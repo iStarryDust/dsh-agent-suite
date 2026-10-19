@@ -1,9 +1,11 @@
 import { createRequire } from "node:module";
 import z from "@deepseek-ai/schemastery";
-import { Context, Service } from "@deepseek-ai/cordis";
+import { Context, Service, symbols } from "@deepseek-ai/cordis";
+import { AnonymousEntries, NamedEntries, ScopedLayers, scopeOf, scopeTarget } from "@deepseek-ai/dsh-scope";
+import { ESCALATION_TARGETS, approveEscalation, validateEscalationArgs } from "@deepseek-ai/dsh-sandbox";
+import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 //#region ../node_modules/@deepseek-ai/dsh-typert-protocol/lib/index.js
 /** The one Remote failure class shared by owners, the Gateway, and consumers. */
 /**
@@ -54,7 +56,7 @@ const REMOTE_METHOD_DESCRIPTOR = "@deepseek-ai/dsh-typert-protocol/remote-method
 * a Host composition to read it.
 * @param service - owning Service instance, normally `this`.
 * @param serviceKey - exact Cordis service key.
-* @param options - optional distinct wire namespace.
+* @param options - optional wire namespace.
 * @returns a frozen, inspectable binding with no compiler-injected metadata.
 */
 function bindTypertRemote(service, serviceKey, options = {}) {
@@ -62,7 +64,7 @@ function bindTypertRemote(service, serviceKey, options = {}) {
 	const namespace = options.namespace ?? serviceKey;
 	validateName("namespace", namespace);
 	const ctx = Reflect.get(service, "ctx");
-	if (ctx instanceof Context) provideInvocationAccessor(ctx);
+	if (Context.is(ctx)) provideInvocationAccessor(ctx);
 	return Object.freeze({
 		service,
 		serviceKey,
@@ -77,7 +79,7 @@ var TypertRemoteService = class extends Service {
 	* Register the Service and bind the same key to Typert Gateway.
 	* @param ctx - owning Cordis Context.
 	* @param serviceKey - exact Cordis service key and default wire namespace.
-	* @param options - optional distinct wire namespace.
+	* @param options - optional wire namespace.
 	*/
 	constructor(ctx, serviceKey, options = {}) {
 		super(ctx, serviceKey);
@@ -97,21 +99,42 @@ function provideInvocationAccessor(ctx) {
 function Remote(methodExportOrOptions, context) {
 	if (typeof methodExportOrOptions === "string") {
 		validateName("Remote export name", methodExportOrOptions);
-		return remoteDecorator({ kind: "direct" }, void 0, methodExportOrOptions);
+		return remoteDecorator({ kind: "direct" }, { exportName: methodExportOrOptions });
 	}
-	if (typeof methodExportOrOptions === "object") {
-		if (remoteOptionMode(methodExportOrOptions) !== "stream" || Reflect.ownKeys(methodExportOrOptions).length !== 1) throw new TypeError("typert-protocol: Remote options must contain exactly mode: \"stream\"");
-		return remoteDecorator({ kind: "direct" }, "stream");
-	}
+	if (typeof methodExportOrOptions === "object") return remoteDecorator({ kind: "direct" }, markerOptions(methodExportOrOptions, REMOTE_OPTION_KEYS, "Remote options require name, mode: \"stream\", or resources"));
 	if (context === void 0) throw new TypeError("typert-protocol: Remote decorator context is missing");
 	addMarkerInitializer(context, { kind: "direct" });
 }
-function remoteOptionMode(options) {
-	return Reflect.get(options, "mode");
+const REMOTE_OPTION_KEYS = /* @__PURE__ */ new Set([
+	"name",
+	"mode",
+	"resources"
+]);
+/** Validate one decorator options object against its accepted keys and select the marker fields. */
+function markerOptions(options, accepted, requirement) {
+	const keys = Reflect.ownKeys(options);
+	if (keys.length === 0 || keys.some((key) => typeof key !== "string" || !accepted.has(key)) || Object.hasOwn(options, "mode") && options.mode !== "stream") throw new TypeError(`typert-protocol: ${requirement}`);
+	const { mode, name, resources } = options;
+	if (name !== void 0) validateName("Remote export name", name);
+	return {
+		...mode === void 0 ? {} : { mode },
+		...name === void 0 ? {} : { exportName: name },
+		...resources === void 0 ? {} : { resources: resourceReaders(resources) }
+	};
 }
-function remoteDecorator(invocation, mode, exportName) {
+/** Freeze declared readers into the marker record; a misdeclared reader fails at decoration. */
+function resourceReaders(resources) {
+	const readers = {};
+	for (const [kind, reader] of Object.entries(resources)) {
+		if (typeof reader !== "function") throw new TypeError(`typert-protocol: Remote resource reader "${kind}" must be a function`);
+		readers[kind] = reader;
+	}
+	if (Object.keys(readers).length === 0) throw new TypeError("typert-protocol: Remote resources require at least one reader");
+	return Object.freeze(readers);
+}
+function remoteDecorator(invocation, options = {}) {
 	return function(_method, context) {
-		addMarkerInitializer(context, invocation, mode, exportName);
+		addMarkerInitializer(context, invocation, options);
 	};
 }
 function readRemoteMethodDescriptor(prototype) {
@@ -125,26 +148,27 @@ function readRemoteMethodDescriptor(prototype) {
 	if (!Array.isArray(methods)) throw new TypeError("typert-protocol: Remote method descriptor methods must be an array");
 	return descriptor;
 }
-function addMarkerInitializer(context, invocation, mode, exportName) {
+function addMarkerInitializer(context, invocation, options = {}) {
 	if (context.private || context.static || typeof context.name !== "string") throw new TypeError("typert-protocol: Remote decorators require a public instance method with a string name");
 	const method = context.name;
 	context.addInitializer(function() {
 		const prototype = Object.getPrototypeOf(this);
 		if (prototype === null) throw new TypeError(`typert-protocol: cannot mark Remote method "${method}" on an object without a prototype`);
-		mark(prototype, method, invocation, mode, exportName);
+		mark(prototype, method, invocation, options);
 	});
 }
-function mark(prototype, method, invocation, mode, exportName) {
+function mark(prototype, method, invocation, { mode, exportName, resources }) {
 	const descriptor = readRemoteMethodDescriptor(prototype);
 	const marker = Object.freeze({
 		method,
 		...exportName === void 0 || exportName === method ? {} : { exportName },
 		...mode === void 0 ? {} : { mode },
-		invocation: Object.freeze(invocation)
+		invocation: Object.freeze(invocation),
+		...resources === void 0 ? {} : { resources }
 	});
 	const current = descriptor?.methods.find((candidate) => candidate.method === method);
 	if (current !== void 0) {
-		if (current.exportName === marker.exportName && current.mode === marker.mode && sameInvocation(current.invocation, invocation)) return;
+		if (current.exportName === marker.exportName && current.mode === marker.mode && current.resources === marker.resources && sameInvocation(current.invocation, invocation)) return;
 		throw new Error(`typert-protocol: Remote method "${method}" has conflicting invocation markers`);
 	}
 	Object.defineProperty(prototype, REMOTE_METHOD_DESCRIPTOR, {
@@ -164,286 +188,629 @@ function validateName(subject, value) {
 	if (!isTypertRemoteSegment(value)) throw new TypeError(`typert-protocol: ${subject} must contain only RPC endpoint segment characters`);
 }
 //#endregion
-//#region ../node_modules/@deepseek-ai/dsh-scope/lib/index.js
+//#region ../node_modules/@deepseek-ai/dsh-util-values/lib/index.js
 /**
-* Shared insertion-ordered storage and effect ownership for scope-aware registries.
-*
-* @module @deepseek-ai/dsh-scope
+* Lazily scanned view of one JSON object's top-level fields, built from text
+* that may still be streaming or from an already parsed object. Nothing is
+* scanned until a reader asks; the view remembers every question it answered
+* and reports changed answers when the owner refreshes for publication.
+* Used for model tool-call arguments: a row reads the fields it
+* cares about at whatever granularity it displays, at every stage of the call.
+* @module @deepseek-ai/dsh-util-values/src/partial-json
 */
-/**
-* Insertion-ordered named entries with caller-owned duplicate diagnostics.
-*
-* Values are borrowed. Iterators are live within one nonempty table
-* generation; draining the table detaches them from later insertions. Each
-* successful insertion returns an idempotent undo for that exact entry.
-*/
-var NamedEntries = class {
-	duplicateError;
-	data = /* @__PURE__ */ new Map();
-	constructor(duplicateError) {
-		this.duplicateError = duplicateError;
-	}
+const SIMPLE_ESCAPES = {
+	"\"": "\"",
+	"\\": "\\",
+	"/": "/",
+	b: "\b",
+	f: "\f",
+	n: "\n",
+	r: "\r",
+	t: "	"
+};
+const CONTENT_ESCAPE = /[\\\u0000-\u001f]/u;
+function isWhitespace(c) {
+	return c === " " || c === "\n" || c === "\r" || c === "	";
+}
+function isHex(c) {
+	return c >= "0" && c <= "9" || c >= "a" && c <= "f" || c >= "A" && c <= "F";
+}
+(class PartialArguments {
+	/** The view of a call with no arguments available. */
+	static EMPTY = PartialArguments.fromObject({});
 	/**
-	* Insert one unique name.
-	* @param name - name unique within this table.
-	* @param value - borrowed value to retain.
-	* @returns an idempotent undo that removes only this insertion.
+	* View finished argument text without scanning it until a reader asks.
+	* @param text - the complete argument JSON text.
+	* @returns a sealed view.
 	*/
-	insert(name, value) {
-		const data = this.data;
-		if (data.has(name)) throw this.duplicateError(name);
-		data.set(name, value);
-		let active = true;
-		return () => {
-			if (!active) return;
-			active = false;
-			data.delete(name);
-			if (data.size === 0 && this.data === data) this.data = /* @__PURE__ */ new Map();
-		};
+	static fromText(text) {
+		const view = new PartialArguments();
+		view.append(text);
+		view.sealed = true;
+		return view;
 	}
 	/**
-	* Read one named value.
-	* @param name - name to resolve.
-	* @returns the retained value, or `undefined` when absent.
+	* View an already parsed argument payload, such as a PTC dispatch object.
+	* @param value - the parsed argument value.
+	* @returns a sealed view; a non-object payload has no fields.
 	*/
-	get(name) {
-		return this.data.get(name);
+	static fromObject(value) {
+		const view = new PartialArguments();
+		view.object = typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+		view.sealed = true;
+		return view;
 	}
 	/**
-	* Test one name for membership.
-	* @param name - name to test.
-	* @returns whether the table contains that name.
+	* The source: text so far or a parsed object, plus whether it can still grow.
+	* These are the only enumerable fields, so two views over the same source
+	* compare equal structurally however far each has been read.
 	*/
-	has(name) {
-		return this.data.has(name);
+	chunks = [];
+	object;
+	sealed = false;
+	#ends = [];
+	#size = 0;
+	#consumed = 0;
+	#mode = "root";
+	#escape = false;
+	#keyStart = 0;
+	#keyEscaped = false;
+	#key = "";
+	#current = null;
+	#nestedEnds = [];
+	#nestedInString = false;
+	#invalidAt;
+	#invalidValue = false;
+	#entries = /* @__PURE__ */ new Map();
+	#order = [];
+	#reads = /* @__PURE__ */ new Map();
+	/** Whether this view rejects further appends; does not scan text or register reads. */
+	get isSealed() {
+		return this.sealed;
+	}
+	/** Whether indexing or a content read found invalid JSON; unread value contents are not validated. */
+	get invalid() {
+		this.scan();
+		return this.#mode === "invalid" || this.#invalidValue;
 	}
 	/**
-	* Iterate live names in insertion order.
-	* @returns the native live key iterator.
+	* Retain streamed argument text without scanning or comparing observed answers.
+	* @param fragment - the text following every fragment appended before.
+	*/
+	append(fragment) {
+		if (this.sealed) throw new Error("PartialArguments: cannot append to a sealed view");
+		if (fragment.length === 0) return;
+		this.chunks.push(fragment);
+		this.#size += fragment.length;
+		this.#ends.push(this.#size);
+	}
+	/**
+	* Reconcile a streamed prefix with authoritative complete text without joining the fragments.
+	* @param text - the final argument text, which replaces missing or conflicting deltas.
+	* @returns this view sealed with its caches retained when every character matches; otherwise a new sealed view.
+	*/
+	settle(text) {
+		if (this.object !== void 0 || text.length !== this.#size) return PartialArguments.fromText(text);
+		let offset = 0;
+		for (const chunk of this.chunks) {
+			if (!text.startsWith(chunk, offset)) return PartialArguments.fromText(text);
+			offset += chunk.length;
+		}
+		this.chunks = text.length === 0 ? [] : [text];
+		this.#ends = text.length === 0 ? [] : [text.length];
+		this.sealed = true;
+		return this;
+	}
+	/**
+	* Compare observed answers and advance their publication baseline. Unread views remain unscanned.
+	* @returns whether any observed answer changed since its first read or the preceding refresh.
+	*/
+	refresh() {
+		if (this.#reads.size === 0) return false;
+		this.scan();
+		let changed = false;
+		let completions = false;
+		for (const read of this.#reads.values()) {
+			if (read.completion) {
+				completions = true;
+				continue;
+			}
+			changed = this.refreshRead(read) || changed;
+		}
+		if (completions) {
+			for (const read of this.#reads.values()) if (read.completion) changed = this.refreshRead(read) || changed;
+		}
+		if (this.sealed) this.#reads.clear();
+		return changed;
+	}
+	refreshRead(read) {
+		const now = read.answer();
+		if (Object.is(now, read.last)) return false;
+		read.last = now;
+		return true;
+	}
+	/**
+	* Check whether no further fields can arrive.
+	* @returns whether the outer object closed, indexing failed, or the view is sealed; unread values are not validated.
+	*/
+	closed() {
+		return this.remember("closed", "", () => this.closedNow());
+	}
+	/**
+	* List discovered fields in first-appearance order.
+	* @returns top-level keys seen so far, in first-appearance order.
 	*/
 	keys() {
-		return this.data.keys();
+		return this.remember("keys", "", () => this.keysNow(), (keys) => keys.length);
 	}
 	/**
-	* Iterate live entries in insertion order.
-	* @returns the native live entry iterator.
+	* Check whether a top-level field has appeared.
+	* @param key - argument name.
+	* @returns whether the field has appeared (a string opened or another value began).
 	*/
-	entries() {
-		return this.data.entries();
+	has(key) {
+		return this.remember("has", key, () => this.hasNow(key));
 	}
 	/**
-	* Iterate live values in insertion order.
-	* @returns the native live value iterator.
+	* Check whether a field's closing delimiter has arrived, without validating its contents.
+	* @param key - argument name.
+	* @returns whether its delimiter arrived and no content reader has reported an error for this value.
 	*/
-	values() {
-		return this.data.values();
+	complete(key) {
+		return this.remember("complete", key, () => this.completeNow(key));
 	}
 	/**
-	* Test whether this table has no entries.
-	* @returns whether the table is empty.
+	* Read string length without materializing its text.
+	* @param key - argument name.
+	* @param options - change granularity for a streaming string.
+	* @returns decoded UTF-16 length of the string field so far; undefined when absent or not a string.
 	*/
-	isEmpty() {
-		return this.data.size === 0;
-	}
-};
-/**
-* Insertion-ordered anonymous entries with independent registration identity.
-*
-* Equal values remain separate registrations. Values are borrowed, and
-* iterators are live within one nonempty table generation; draining the table
-* detaches them from later appends.
-*/
-var AnonymousEntries = class {
-	data = /* @__PURE__ */ new Map();
-	/**
-	* Append one independently owned value.
-	* @param value - borrowed value to retain.
-	* @returns an idempotent undo for this exact append.
-	*/
-	append(value) {
-		const data = this.data;
-		const key = Symbol();
-		data.set(key, value);
-		let active = true;
-		return () => {
-			if (!active) return;
-			active = false;
-			data.delete(key);
-			if (data.size === 0 && this.data === data) this.data = /* @__PURE__ */ new Map();
-		};
+	stringLength(key, options) {
+		const step = Math.max(1, Math.floor(options?.step ?? 1));
+		const offset = options?.offset ?? 0;
+		return this.remember(`length:${step}:${offset}`, key, () => this.lengthNow(key), (length) => length === void 0 ? void 0 : Math.ceil((length + offset) / step));
 	}
 	/**
-	* Iterate live values in insertion order.
-	* @returns the native live value iterator.
+	* Check a string against a decoded UTF-16 length limit without materializing it.
+	* @param key - argument name.
+	* @param maxLength - decoded UTF-16 limit, floored to at least zero.
+	* @returns whether the string is longer than the limit; false when absent or not a string.
 	*/
-	values() {
-		return this.data.values();
+	stringExceeds(key, maxLength) {
+		const limit = Math.max(0, Math.floor(maxLength));
+		return this.remember(`exceeds:${limit}`, key, () => (this.lengthNow(key, limit + 1) ?? 0) > limit);
 	}
 	/**
-	* Test whether this table has no entries.
-	* @returns whether the table is empty.
+	* Read a decoded string, including a streaming prefix.
+	* @param key - argument name.
+	* @returns the string field's decoded text so far; undefined when absent or not a string.
 	*/
-	isEmpty() {
-		return this.data.size === 0;
-	}
-};
-/**
-* Own the global and exact-scope layers for one registry.
-*
-* Reads never create scoped layers. Registrations derive both visibility and
-* effect ownership from the supplied Cordis context, collect undo before
-* notification, and reclaim only a completely empty aggregate layer.
-*/
-var ScopedLayers = class {
-	createLayer;
-	onChange;
-	/** The eagerly constructed context-global layer. */
-	global;
-	scoped = /* @__PURE__ */ new Map();
-	constructor(createLayer, onChange) {
-		this.createLayer = createLayer;
-		this.onChange = onChange;
-		this.global = createLayer(void 0);
+	text(key) {
+		return this.remember("text", key, () => this.textNow(key));
 	}
 	/**
-	* Read an existing exact-scope overlay. Deliberately chain-blind: callers
-	* addressing one scope's OWN contributions (its restrictions, its guards)
-	* must not silently pick up an ancestor's — use {@link chainLayers} where
-	* inheritance is the point.
-	* @param scope - exact scope key; `undefined` denotes no overlay.
-	* @returns the existing scoped layer, or `undefined` without creating one.
+	* Read at most the first decoded UTF-16 units of a string.
+	* @param key - argument name.
+	* @param maxLength - maximum decoded UTF-16 length, floored to at least one.
+	* @returns the bounded string prefix; undefined when absent or not a string.
 	*/
-	peek(scope) {
-		if (scope === void 0) return void 0;
-		return this.scoped.get(scope);
+	textPrefix(key, maxLength) {
+		const limit = Math.max(1, Math.floor(maxLength));
+		return this.remember(`prefix:${limit}`, key, () => this.textPrefixNow(key, limit));
 	}
 	/**
-	* Existing overlays along the scope's parent chain ({@link scopeChainOf}),
-	* farthest ancestor first and the exact scope last, so a caller layering
-	* them in order gives the nearest scope the final word.
-	* @param scope - viewing scope, or `undefined` for no overlays.
-	* @returns the existing layers, nearest last; absent overlays are skipped.
+	* Read a completed non-string argument.
+	* @param key - argument name.
+	* @returns the parsed non-string value once it closed; undefined while open, absent, or a string.
 	*/
-	chainLayers(scope) {
-		const layers = [];
-		for (const key of scopeChainOf(scope).reverse()) {
-			const layer = this.scoped.get(key);
-			if (layer !== void 0) layers.push(layer);
+	value(key) {
+		return this.remember("value", key, () => this.valueNow(key));
+	}
+	/** Answer a question and, on a streaming view, remember it for change detection. */
+	remember(kind, key, read, comparison) {
+		this.scan();
+		const result = read();
+		if (!this.sealed) {
+			const id = `${kind}/${key}`;
+			if (!this.#reads.has(id)) this.#reads.set(id, {
+				completion: kind === "complete",
+				answer: comparison === void 0 ? read : () => comparison(read()),
+				last: comparison === void 0 ? result : comparison(result)
+			});
 		}
-		return layers;
+		return result;
 	}
-	/**
-	* Materialize global named entries followed by scope-chain shadows,
-	* farthest ancestor first, so the nearest scope's entry wins a name.
-	* @param scope - viewing scope, or `undefined` for the global view.
-	* @param pick - select the named table from a layer.
-	* @returns an insertion-ordered effective map.
-	*/
-	merge(scope, pick) {
-		const merged = new Map(pick(this.global).entries());
-		for (const layer of this.chainLayers(scope)) for (const [name, value] of pick(layer).entries()) merged.set(name, value);
-		return merged;
+	closedNow() {
+		return this.sealed || this.#mode === "closed" || this.#mode === "invalid";
 	}
-	/**
-	* Attach one synchronous layer mutation to its registration context.
-	* @param ctx - context that determines both scope visibility and effect ownership.
-	* @param action - atomic mutation returning its synchronous undo.
-	* @param options - Cordis effect label and optional change notification.
-	* @returns the exact disposer returned by `ctx.effect()`.
-	*/
-	effect(ctx, action, options) {
-		const scope = scopeOf(ctx);
-		const notify = options.notify ?? true;
-		return ctx.effect(function* () {
-			let layer;
-			let created = false;
-			if (scope === void 0) layer = this.global;
-			else {
-				const existing = this.scoped.get(scope);
-				if (existing === void 0) {
-					layer = this.createLayer(scope);
-					this.scoped.set(scope, layer);
-					created = true;
-				} else layer = existing;
-			}
-			let undo;
+	keysNow() {
+		return this.object === void 0 ? this.#order : Object.keys(this.object);
+	}
+	hasNow(key) {
+		return this.object === void 0 ? this.#entries.has(key) : Object.hasOwn(this.object, key);
+	}
+	completeNow(key) {
+		if (this.object !== void 0) return Object.hasOwn(this.object, key);
+		const entry = this.#entries.get(key);
+		return entry !== void 0 && entry.end >= 0 && (entry.kind === "string" ? entry.invalidAt === void 0 : !entry.invalid);
+	}
+	lengthNow(key, limit = Number.POSITIVE_INFINITY) {
+		if (this.object !== void 0) {
+			const field = Object.hasOwn(this.object, key) ? this.object[key] : void 0;
+			return typeof field === "string" ? field.length : void 0;
+		}
+		const entry = this.#entries.get(key);
+		if (entry?.kind !== "string") return void 0;
+		if (entry.text !== void 0 && entry.text.at === entry.end) return entry.text.length;
+		const read = entry.length ??= {
+			at: entry.start,
+			length: 0,
+			text: ""
+		};
+		this.readString(entry, read, limit, false);
+		return read.length;
+	}
+	textNow(key) {
+		if (this.object !== void 0) {
+			const field = Object.hasOwn(this.object, key) ? this.object[key] : void 0;
+			return typeof field === "string" ? field : void 0;
+		}
+		const entry = this.#entries.get(key);
+		if (entry?.kind !== "string") return void 0;
+		if (entry.text === void 0 && entry.end >= 0 && entry.needsDecoding && entry.invalidAt === void 0) {
+			let text;
 			try {
-				undo = action(layer);
-			} catch (error) {
-				if (scope !== void 0 && created && layer.isEmpty()) this.scoped.delete(scope);
-				throw error;
-			}
-			yield () => {
-				undo();
-				if (scope !== void 0 && layer.isEmpty()) this.scoped.delete(scope);
-				if (notify) this.onChange();
+				text = JSON.parse(`"${this.slice(entry.start, entry.end)}"`);
+			} catch (_error) {}
+			if (text !== void 0) entry.text = {
+				at: entry.end,
+				length: text.length,
+				text
 			};
-			if (notify) this.onChange();
-		}.bind(this), options.label);
+		}
+		const read = entry.text ??= {
+			at: entry.start,
+			length: 0,
+			text: ""
+		};
+		this.readString(entry, read, Number.POSITIVE_INFINITY, true);
+		return read.text;
 	}
-};
-/**
-* Scoped-context primitive: mint a Cordis context that tags registrations with
-* an opaque identity and build routing-only event carriers for that identity.
-*
-* @module @deepseek-ai/dsh-scope
-*/
-/** Context tag written by {@link createScope}. */
-const kScope = Symbol("dsh.scope");
-/** The key associated with each carrier. Presence distinguishes an unkeyed carrier from a non-carrier. */
-const carrierKeys = /* @__PURE__ */ new WeakMap();
-/**
-* The enclosing scope of each key. One relation powers both directions of
-* scope nesting: registration views inherit DOWN the chain (a child scope
-* sees its ancestors' layers — {@link ScopedLayers}), and event admission
-* extends UP it (a listener tagged with an ancestor receives events dispatched
-* to a descendant key — {@link scopeTarget}).
-*/
-const scopeParents = /* @__PURE__ */ new WeakMap();
-/**
-* The chain from a key to its root ancestor.
-* @param key - the starting key, or `undefined` for the empty chain.
-* @returns keys nearest-first: `[key, parent, grandparent, …]`.
-*/
-function scopeChainOf(key) {
-	const chain = [];
-	for (let cursor = key; cursor !== void 0; cursor = scopeParents.get(cursor)) chain.push(cursor);
-	return chain;
-}
-/**
-* Read the nearest scope tag inherited by a context.
-* @param ctx - context to inspect.
-* @returns its scope key, or `undefined` for an unscoped context.
-*/
-function scopeOf(ctx) {
-	return ctx[kScope];
-}
-/**
-* Build an opaque receiver that preserves the base filter, admits untagged
-* listeners globally, and admits tagged listeners for a matching key or any
-* of its ancestors ({@link bindScopeParent}): a listener owned by an enclosing
-* scope receives every descendant scope's events, which is what lets one
-* standing composition observe each of the agents composed under it. A tag
-* BELOW the dispatch key stays excluded — events flow up the chain, never
-* down.
-* @param base - subject or service whose existing Cordis filter is preserved.
-* @param key - routed scope identity, or `undefined` for an unscoped subject.
-* @returns a carrier whose subject remains available only through event arguments.
-*/
-function scopeTarget(base, key) {
-	const baseFilter = base[Context.filter];
-	const carrier = { [Context.filter](ctx) {
-		if (baseFilter !== void 0 && !baseFilter.call(base, ctx)) return false;
-		const tag = scopeOf(ctx);
-		if (tag === void 0) return true;
-		for (let cursor = key; cursor !== void 0; cursor = scopeParents.get(cursor)) if (cursor === tag) return true;
-		return false;
-	} };
-	carrierKeys.set(carrier, key);
-	return carrier;
-}
-//#endregion
-//#region ../node_modules/@deepseek-ai/dsh-util-values/lib/index.js
+	textPrefixNow(key, maxLength) {
+		if (this.object !== void 0) {
+			const field = Object.hasOwn(this.object, key) ? this.object[key] : void 0;
+			return typeof field === "string" ? field.slice(0, maxLength) : void 0;
+		}
+		const entry = this.#entries.get(key);
+		if (entry?.kind !== "string") return void 0;
+		const prefixes = entry.prefixes ??= /* @__PURE__ */ new Map();
+		let read = prefixes.get(maxLength);
+		if (read === void 0) {
+			read = {
+				at: entry.start,
+				length: 0,
+				text: ""
+			};
+			prefixes.set(maxLength, read);
+		}
+		this.readString(entry, read, maxLength, true);
+		return read.text;
+	}
+	valueNow(key) {
+		if (this.object !== void 0) {
+			if (!Object.hasOwn(this.object, key)) return void 0;
+			const field = this.object[key];
+			return typeof field === "string" ? void 0 : field;
+		}
+		const entry = this.#entries.get(key);
+		if (entry?.kind !== "value" || entry.end < 0 || entry.invalid) return void 0;
+		if (entry.parsed === void 0) try {
+			entry.parsed = JSON.parse(this.slice(entry.start, entry.end));
+		} catch (_error) {
+			entry.invalid = true;
+			this.#invalidValue = true;
+		}
+		return entry.parsed;
+	}
+	chunkAt(at) {
+		let low = 0;
+		let high = this.#ends.length;
+		while (low < high) {
+			const mid = low + high >>> 1;
+			if (this.#ends[mid] <= at) low = mid + 1;
+			else high = mid;
+		}
+		return low;
+	}
+	/** Materialize only a requested range, never the cumulative source. */
+	slice(start, end) {
+		if (start >= end) return "";
+		const first = this.chunkAt(start);
+		const last = this.chunkAt(end - 1);
+		const base = first === 0 ? 0 : this.#ends[first - 1];
+		if (first === last) return this.chunks[first].slice(start - base, end - base);
+		const parts = [this.chunks[first].slice(start - base)];
+		for (let i = first + 1; i < last; i++) parts.push(this.chunks[i]);
+		parts.push(this.chunks[last].slice(0, end - this.#ends[last - 1]));
+		return parts.join("");
+	}
+	readString(entry, read, limit, materialize) {
+		const end = Math.min(entry.end < 0 ? this.#consumed : entry.end, entry.invalidAt ?? Number.POSITIVE_INFINITY, this.#invalidAt ?? Number.POSITIVE_INFINITY);
+		if (!entry.needsDecoding) {
+			const length = Math.min(end - read.at, limit - read.length);
+			if (length <= 0) return;
+			if (materialize) read.text += this.slice(read.at, read.at + length);
+			read.at += length;
+			read.length += length;
+			return;
+		}
+		let chunkIndex = this.chunkAt(read.at);
+		while (read.at < end && read.length < limit) {
+			const base = chunkIndex === 0 ? 0 : this.#ends[chunkIndex - 1];
+			const chunk = this.chunks[chunkIndex];
+			const remaining = chunk.slice(read.at - base, Math.min(chunk.length, end - base));
+			const boundary = remaining.search(CONTENT_ESCAPE);
+			const length = Math.min(boundary < 0 ? remaining.length : boundary, limit - read.length);
+			if (length > 0) {
+				if (materialize) read.text += remaining.slice(0, length);
+				read.at += length;
+				read.length += length;
+				if (read.at === base + chunk.length) chunkIndex++;
+				continue;
+			}
+			const type = remaining.length > 1 ? remaining[1] : read.at + 1 < end ? this.chunks[chunkIndex + 1][0] : void 0;
+			let decoded;
+			let width = 2;
+			if (remaining[0] === "\\" && type === void 0 && entry.end < 0) return;
+			if (remaining[0] === "\\" && type === "u") {
+				const hex = this.slice(read.at + 2, Math.min(end, read.at + 6));
+				let valid = true;
+				for (let i = 0; i < hex.length; i++) if (!isHex(hex[i])) valid = false;
+				if (valid) {
+					if (hex.length < 4 && entry.end < 0) return;
+					if (hex.length === 4) decoded = String.fromCharCode(Number.parseInt(hex, 16));
+				}
+				width = 6;
+			} else if (remaining[0] === "\\" && type !== void 0) decoded = SIMPLE_ESCAPES[type];
+			if (decoded === void 0) {
+				entry.invalidAt = read.at;
+				this.#invalidValue = true;
+				return;
+			}
+			if (materialize) read.text += decoded;
+			read.length++;
+			read.at += width;
+			while (chunkIndex < this.chunks.length && read.at >= this.#ends[chunkIndex]) chunkIndex++;
+		}
+	}
+	/** Locate new field ranges without decoding or parsing their contents. */
+	scan() {
+		if (this.object !== void 0 || this.#consumed === this.#size) return;
+		for (let i = this.chunkAt(this.#consumed); i < this.chunks.length && this.#invalidAt === void 0; i++) {
+			const pending = this.chunks[i];
+			const base = i === 0 ? 0 : this.#ends[i - 1];
+			for (let index = this.#consumed - base; index < pending.length && this.#mode !== "invalid"; index++) {
+				if (this.#mode === "string" || this.#mode === "nested" && this.#nestedInString) {
+					const end = this.stringBoundary(pending, index);
+					this.#consumed += end - index;
+					index = end;
+					if (index === pending.length) break;
+				}
+				this.step(pending[index], this.#consumed);
+				this.#consumed++;
+			}
+		}
+	}
+	/** Only raw quotes and their preceding backslash runs can terminate a string. */
+	stringBoundary(fragment, start) {
+		let at = start;
+		while (true) {
+			const quote = fragment.indexOf("\"", at);
+			const end = quote < 0 ? fragment.length : quote;
+			if (this.#mode === "string") {
+				const entry = this.#current;
+				if (!entry.needsDecoding && CONTENT_ESCAPE.test(fragment.slice(at, end))) entry.needsDecoding = true;
+			}
+			let slashStart = end;
+			while (slashStart > at && fragment[slashStart - 1] === "\\") slashStart--;
+			const escaped = (end - slashStart) % 2 === 1 !== (slashStart === at && this.#escape);
+			this.#escape = quote < 0 && escaped;
+			if (quote < 0 || !escaped) return end;
+			at = quote + 1;
+		}
+	}
+	step(c, at) {
+		switch (this.#mode) {
+			case "root":
+				if (isWhitespace(c)) return;
+				if (c === "{") {
+					this.#mode = "key-or-end";
+					return;
+				}
+				this.fail();
+				return;
+			case "key-or-end":
+				if (isWhitespace(c)) return;
+				if (c === "}") {
+					this.#mode = "closed";
+					return;
+				}
+				if (c === "\"") {
+					this.beginKey(at);
+					return;
+				}
+				this.fail();
+				return;
+			case "key-only":
+				if (isWhitespace(c)) return;
+				if (c === "\"") {
+					this.beginKey(at);
+					return;
+				}
+				this.fail();
+				return;
+			case "key":
+				this.stepKey(c, at);
+				return;
+			case "colon":
+				if (isWhitespace(c)) return;
+				if (c === ":") {
+					this.#mode = "value";
+					return;
+				}
+				this.fail();
+				return;
+			case "value":
+				this.beginValue(c, at);
+				return;
+			case "string": {
+				const entry = this.#current;
+				entry.end = at;
+				this.#current = null;
+				this.#mode = "comma-or-end";
+				return;
+			}
+			case "scalar":
+				this.stepScalar(c, at);
+				return;
+			case "nested":
+				this.stepNested(c, at);
+				return;
+			case "comma-or-end":
+				if (isWhitespace(c)) return;
+				if (c === ",") {
+					this.#mode = "key-only";
+					return;
+				}
+				if (c === "}") {
+					this.#mode = "closed";
+					return;
+				}
+				this.fail();
+				return;
+			case "closed":
+				if (isWhitespace(c)) return;
+				this.fail();
+				return;
+			/* v8 ignore next 2 -- scan() stops stepping once the view is invalid. */
+			case "invalid": return;
+			/* v8 ignore next 2 -- Every scanner mode has a handler above. */
+			default: assertNever(this.#mode);
+		}
+	}
+	fail() {
+		this.#invalidAt = this.#consumed;
+		this.#mode = "invalid";
+		this.#current = null;
+	}
+	beginKey(at) {
+		this.#mode = "key";
+		this.#keyStart = at + 1;
+		this.#keyEscaped = false;
+		this.#escape = false;
+	}
+	stepKey(c, at) {
+		if (c < " ") {
+			this.fail();
+			return;
+		}
+		if (this.#escape) {
+			this.#escape = false;
+			return;
+		}
+		if (c === "\\") {
+			this.#escape = true;
+			this.#keyEscaped = true;
+			return;
+		}
+		if (c !== "\"") return;
+		const raw = this.slice(this.#keyStart, at);
+		if (this.#keyEscaped) try {
+			this.#key = JSON.parse(`"${raw}"`);
+		} catch (_error) {
+			this.fail();
+			return;
+		}
+		else this.#key = raw;
+		this.#mode = "colon";
+	}
+	open(entry) {
+		if (!this.#entries.has(this.#key)) this.#order.push(this.#key);
+		this.#entries.set(this.#key, entry);
+		this.#current = entry;
+	}
+	beginValue(c, at) {
+		if (isWhitespace(c)) return;
+		if (c === "\"") {
+			this.open({
+				kind: "string",
+				start: at + 1,
+				end: -1,
+				needsDecoding: false,
+				invalidAt: void 0,
+				length: void 0,
+				text: void 0,
+				prefixes: void 0
+			});
+			this.#escape = false;
+			this.#mode = "string";
+			return;
+		}
+		if (c === "}" || c === "," || c === ":" || c === "]") {
+			this.fail();
+			return;
+		}
+		this.open({
+			kind: "value",
+			start: at,
+			end: -1,
+			parsed: void 0,
+			invalid: false
+		});
+		if (c === "{" || c === "[") {
+			this.#mode = "nested";
+			this.#nestedEnds = [c === "{" ? "}" : "]"];
+			this.#nestedInString = false;
+			this.#escape = false;
+			return;
+		}
+		this.#mode = "scalar";
+	}
+	stepScalar(c, at) {
+		if (c !== "," && c !== "}" && !isWhitespace(c)) return;
+		this.closeValue(at);
+		this.#mode = c === "," ? "key-only" : c === "}" ? "closed" : "comma-or-end";
+	}
+	stepNested(c, at) {
+		if (this.#nestedInString) {
+			this.#nestedInString = false;
+			return;
+		}
+		if (c === "\"") {
+			this.#nestedInString = true;
+			return;
+		}
+		if (c === "{" || c === "[") {
+			this.#nestedEnds.push(c === "{" ? "}" : "]");
+			return;
+		}
+		if (c === "}" || c === "]") {
+			if (this.#nestedEnds.pop() !== c) {
+				this.fail();
+				return;
+			}
+			if (this.#nestedEnds.length === 0) {
+				this.closeValue(at + 1);
+				this.#mode = "comma-or-end";
+			}
+		}
+	}
+	closeValue(end) {
+		const entry = this.#current;
+		entry.end = end;
+		this.#current = null;
+	}
+});
 /** Duplicate-install-safe JSON and immutable-value helpers. @module @deepseek-ai/dsh-util-values */
 /**
 * Mark an unreachable closed-union branch.
@@ -455,12 +822,12 @@ function assertNever(value, context) {
 	const rendered = JSON.stringify(value) ?? String(value);
 	throw new Error(`unreachable variant${context ? ` in ${context}` : ""}: ${rendered}`);
 }
-/** Whether a realm-owned intrinsic prototype is backed by its native constructor. */
+/** Whether a realm-owned intrinsic prototype has a native constructor matching this engine's representation. */
 function hasIntrinsicConstructor$1(prototype, name) {
 	const constructor = Object.getOwnPropertyDescriptor(prototype, "constructor")?.value;
 	if (typeof constructor !== "function") return false;
 	try {
-		return constructor.name === name && constructor.prototype === prototype && Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`;
+		return constructor.name === name && constructor.prototype === prototype && Function.prototype.toString.call(constructor) === Function.prototype.toString.call(name === "Array" ? Array : Object);
 	} catch {
 		return false;
 	}
@@ -748,7 +1115,7 @@ function createAssistantMessage(input) {
 */
 /**
 * Base class for all harness errors. Carries a `code` (stable, programmatic —
-* e.g. `NO_ADAPTER`, `INVALID_ARGS`, `INVARIANT`) distinct from the
+* e.g. `NO_ADAPTER`, `INVALID_ARGS`) distinct from the
 * human-readable `message`, and supports `cause` chaining via the standard
 * `ErrorOptions`. `name` defaults to the subclass constructor name.
 */
@@ -1161,7 +1528,7 @@ function projectToolUpdates(messages, tools, toolUpdate, history) {
 /**
 * Centralize the non-secret product identity every provider request sends as `User-Agent`, keeping
 * adapters from drifting. See
-* `.agents/notes/implemented/architecture/2026-06-21-mandatory-app-attribution-headers.md`.
+* `docs/subsystems/llm-streaming.md#appidentity--app-attribution`.
 *
 * App-attribution vocabulary for provider requests.
 * @module @deepseek-ai/dsh-llm/attribution
@@ -1491,20 +1858,14 @@ var LlmError = class extends HarnessError {
 		}
 		/** Notify topology observers without letting one broken listener veto the commit. */
 		emitAdaptersUpdated() {
-			let invariantFailure;
 			for (const listener of this.ctx.events.dispatch("emit", ["llm/adapters-updated"])) try {
 				const returned = listener();
 				if (returned != null && typeof returned.then === "function") Promise.resolve(returned).then(void 0, (error) => {
 					this.warnAdaptersListenerFailure(error);
 				});
 			} catch (error) {
-				if (error?.code === "INVARIANT") {
-					invariantFailure ??= error;
-					continue;
-				}
 				this.warnAdaptersListenerFailure(error);
 			}
-			if (invariantFailure !== void 0) throw invariantFailure;
 		}
 		/** Contained-listener diagnostic shared by the sync and async failure paths. */
 		warnAdaptersListenerFailure(error) {
@@ -1613,10 +1974,7 @@ var LlmError = class extends HarnessError {
 					if (entry.provider.length === 0 || entry.displayName.length === 0 || entry.settingsNs.length === 0) throw new LlmError("configurable providers need a non-empty provider, displayName, and settingsNs", "INVALID_DIRECTORY");
 					if (entry.settingsPath.some((segment) => segment.length === 0)) throw new LlmError(`configurable provider "${entry.provider}" has an empty settingsPath segment`, "INVALID_DIRECTORY");
 					if (this.directory.has(entry.provider) && !own.has(entry.provider) || detached.some((seen) => seen.provider === entry.provider)) throw new LlmError(`configurable provider "${entry.provider}" is already declared`, "DUPLICATE_DIRECTORY");
-					detached.push({
-						...entry,
-						settingsPath: [...entry.settingsPath]
-					});
+					detached.push(detachDirectoryEntry(entry));
 				}
 				for (const entry of held) this.directory.delete(entry.provider);
 				for (const entry of detached) this.directory.set(entry.provider, entry);
@@ -1645,10 +2003,7 @@ var LlmError = class extends HarnessError {
 		* @returns detached directory entries in declaration order.
 		*/
 		listConfigurableProviders() {
-			return [...this.directory.values()].map((entry) => ({
-				...entry,
-				settingsPath: [...entry.settingsPath]
-			}));
+			return [...this.directory.values()].map(detachDirectoryEntry);
 		}
 		/**
 		* Offer to interrogate provider endpoints on behalf of the settings
@@ -1738,6 +2093,16 @@ var LlmError = class extends HarnessError {
 		*/
 		imageRequestPricing(provider, model) {
 			return this.adapters.get(provider)?.adapter.imageRequestPricing(provider, model);
+		}
+		/**
+		* Resolve the image projection for an exact registered model route.
+		* @param provider - registered provider route.
+		* @param model - exact model id.
+		* @param image - normalized image reference.
+		* @returns dimensions and byte target used by the adapter's request serializer.
+		*/
+		imageRequestTarget(provider, model, image) {
+			return this.registration(provider).adapter.imageRequestTarget(provider, model, image);
 		}
 		/**
 		* Resolve the exact text one durable file occurrence contributes to every
@@ -1885,20 +2250,33 @@ var LlmError = class extends HarnessError {
 		* Resolve one call under its current adapter registration. The returned
 		* one-shot handle keeps that registration across header logging and dispatch,
 		* so HMR cannot combine one adapter's capability result with another adapter.
-		* @param config - provider/model route and optional request controls.
+		* An optional synchronous callback selects concrete controls using captured
+		* model metadata. Defaults and validation apply to its result. Callback
+		* failures and cancellation reject preparation before dispatch.
+		* @param config - provider/model route and optional concrete request controls.
 		* @param signal - optional cancellation for adapter-owned capability lookup.
+		* @param configure - pure control selection, called once before defaults and validation.
 		* @returns a prepared config and its registration-bound stream entry point.
 		*/
-		async prepareCall(config, signal) {
-			const registration = this.registration(config.provider);
-			const adapterCall = await registration.adapter.prepareCall(config.provider, config.model, signal);
-			const modelInfo = this.normalizeModelInfo(registration, config.model, adapterCall.model);
-			const resolved = this.resolveCallWithInfo(config, modelInfo);
+		async prepareCall(config, signal, configure) {
+			signal?.throwIfAborted();
+			const { provider, model, ...controls } = config;
+			const registration = this.registration(provider);
+			const adapterCall = await registration.adapter.prepareCall(provider, model, signal);
+			signal?.throwIfAborted();
+			const modelInfo = this.normalizeModelInfo(registration, model, adapterCall.model);
+			const proposed = configure === void 0 ? config : {
+				...configure(deepFreeze(structuredClone(controls)), deepFreeze(modelInfo)),
+				provider,
+				model
+			};
+			signal?.throwIfAborted();
+			const resolved = this.resolveCallWithInfo(proposed, modelInfo);
 			const resolvedConfig = deepFreeze(structuredClone(resolved.config));
 			const context = resolved.context === void 0 ? void 0 : deepFreeze(structuredClone(resolved.context));
 			const adapterDefaults = deepFreeze({
-				...config.reasoningEffort === void 0 && resolvedConfig.reasoningEffort !== void 0 ? { reasoningEffort: true } : {},
-				...config.maxTokens === void 0 && resolvedConfig.maxTokens !== void 0 ? { maxTokens: true } : {}
+				...proposed.reasoningEffort === void 0 && resolvedConfig.reasoningEffort !== void 0 ? { reasoningEffort: true } : {},
+				...proposed.maxTokens === void 0 && resolvedConfig.maxTokens !== void 0 ? { maxTokens: true } : {}
 			});
 			let dispatched = false;
 			return Object.freeze({
@@ -2075,91 +2453,18 @@ function adapterFailureChunk(error, signal) {
 		}
 	};
 }
-//#endregion
-//#region ../node_modules/@deepseek-ai/dsh-sandbox/lib/index.js
-/**
-* The escalation vocabulary and choreography shared by every sandbox-enforcing
-* tool family (`@deepseek-ai/dsh-tool-bash`, `@deepseek-ai/dsh-tool-fs`): the
-* strictly-wider ladder, the argument-pairing validation, the model-facing
-* denial/hint markers, and {@link approveEscalation} — the ordered fail-closed
-* sequence that resolves a `sandbox_permissions` request through a
-* user-approval channel BEFORE anything executes. One home keeps the two
-* families' approval ordering and verbatim error texts from drifting apart.
-*
-* The channel is a minimal STRUCTURAL function shape ({@link EscalationAsk}),
-* not the approval service type: the tool layer — which owns the agent, the
-* call id, and the tool name — closes over `ctx.approval.request(...)` and
-* hands the closure down, so this package never depends on the approval or
-* agent packages.
-*
-* @module dsh-sandbox/escalation
-*/
-/**
-* The strictly-wider table: what a call whose effective mode is the key may
-* escalate TO. Checked at EXECUTION, never baked into a tool schema — the
-* schema's enum is {@link ESCALATION_TARGETS}, because schemas are
-* registry-global while the effective mode is per-call truth.
-*/
-const WIDER_MODES = {
-	"read-only": ["workspace-write", "danger-full-access"],
-	"workspace-write": ["danger-full-access"]
-};
-/**
-* The closed escalation-target vocabulary — every mode a call could ever
-* escalate TO (`read-only` is the floor; nothing escalates to it). Advertised
-* whenever the mounted capability confines: cutting the enum down to the modes
-* wider than the composition's DEFAULT would strand a session whose effective
-* mode sits below it (a `danger-full-access` default would advertise nothing
-* while a narrower-switched session stays confined with no lever).
-*/
-const ESCALATION_TARGETS = ["workspace-write", "danger-full-access"];
-/**
-* Validate the escalation argument pairing a tool schema cannot express:
-* `sandbox_permissions` and `justification` travel together — an approval
-* prompt without a reason, or a reason driving nothing, is a malformed ask —
-* and the justification must be a non-empty sentence.
-* @param sandboxPermissions - the raw `sandbox_permissions` argument, if given.
-* @param justification - the raw `justification` argument, if given.
-*/
-function validateEscalationArgs(sandboxPermissions, justification) {
-	if (sandboxPermissions !== void 0 && justification === void 0) throw new Error("invalid escalation: sandbox_permissions requires a justification");
-	if (justification !== void 0 && sandboxPermissions === void 0) throw new Error("invalid escalation: justification is only valid together with sandbox_permissions");
-	if (justification !== void 0 && justification.trim().length === 0) throw new Error("invalid justification: expected a non-empty sentence");
-}
-/**
-* Resolve a sandbox permission request before execution. Repeating the call's
-* effective mode returns it without approval. A strictly wider mode requires
-* approval and applies only to this call. Narrower or unsupported targets,
-* missing approval services or agents for widening, and non-grant outcomes
-* throw before execution.
-* @param request - the escalation to judge (see {@link EscalationRequest}).
-* @param approval - the approval ingredients the tool holds (see {@link EscalationApproval}).
-* @returns the granted mode, consumed by the one call that asked.
-*/
-async function approveEscalation(request, approval) {
-	const { requestedMode: mode, effectiveMode, justification, subject } = request;
-	if (mode === effectiveMode) return effectiveMode;
-	if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode)) throw new Error(`sandbox escalation to "${mode}" is not strictly wider than this call's current "${effectiveMode}" mode`);
-	if (approval.approver === void 0) throw new Error(`sandbox escalation to "${mode}" requires approval, but no approval service is composed`);
-	if (approval.agent === void 0) throw new Error(`sandbox escalation to "${mode}" requires approval, but the call has no agent to route it through`);
-	const outcome = await approval.approver.request({
-		agent: approval.agent,
-		toolName: approval.toolName,
-		callId: approval.callId,
-		reason: `escalate sandbox to ${mode}: ${justification}`,
-		displayReason: {
-			en: `Allow this operation with ${mode} permissions: ${justification}`,
-			zh: `允许本次操作使用 ${mode} 权限：${justification}`
-		},
-		...approval.signal ? { signal: approval.signal } : {}
-	});
-	switch (outcome) {
-		case "allowed-once": return mode;
-		case "rejected": throw new Error(`the user rejected escalating this ${subject} to "${mode}"; it stays denied, so stop and explain instead of working around it`);
-		case "cancelled": throw new Error(`approval for escalating to "${mode}" was cancelled`);
-		case "unavailable": throw new Error(`sandbox escalation to "${mode}" requires approval, but no approval channel is available`);
-		default: return assertNever(outcome, "EscalationOutcome");
-	}
+/** Copy a directory entry, including its arrays, so neither side can mutate the other's copy. */
+function detachDirectoryEntry(entry) {
+	const { nativeAuth } = entry;
+	return {
+		...entry,
+		settingsPath: [...entry.settingsPath],
+		...entry.baseURLEnv === void 0 ? {} : { baseURLEnv: [...entry.baseURLEnv] },
+		...nativeAuth === void 0 ? {} : { nativeAuth: {
+			...nativeAuth,
+			env: [...nativeAuth.env]
+		} }
+	};
 }
 //#endregion
 //#region ../node_modules/@deepseek-ai/dsh-tools/lib/index.js
@@ -3019,6 +3324,61 @@ function defineTool(options) {
 	};
 	return tool;
 }
+/** Keeps calls under a changed policy from overlapping their canceled predecessors. */
+var PtcCalls = class {
+	calls = /* @__PURE__ */ new Map();
+	disposed = false;
+	/**
+	* Observe policy changes for the owning tool registry.
+	* @param ctx - Registry lifecycle and Session events.
+	*/
+	constructor(ctx) {
+		ctx.on("session/event", (session, event) => {
+			if (event.type !== "sandbox/mode") return;
+			for (const call of this.calls.get(session.id) ?? []) if (call.mode !== event.data.mode) call.controller.abort(/* @__PURE__ */ new Error("sandbox mode changed"));
+		}, { global: true });
+		ctx.effect(() => async () => {
+			this.disposed = true;
+			const calls = [...this.calls.values()].flatMap((calls) => [...calls]);
+			for (const call of calls) call.controller.abort(/* @__PURE__ */ new Error("PTC tool registry disposed"));
+			await Promise.all(calls.map((call) => call.done));
+		}, "PTC calls");
+	}
+	/**
+	* Await canceled predecessors before resolving authority and admitting a call.
+	* @param sessionId - Calling Session.
+	* @param signal - Caller cancellation.
+	* @param mode - Current standing mode, read after preceding cleanup.
+	* @param run - Complete call, including nested-tool cleanup.
+	* @returns The call result.
+	*/
+	async run(sessionId, signal, mode, run) {
+		for (;;) {
+			const pending = [...this.calls.get(sessionId) ?? []].filter((call) => call.controller.signal.aborted);
+			if (pending.length === 0) break;
+			await Promise.all(pending.map((call) => call.done));
+		}
+		signal.throwIfAborted();
+		if (this.disposed) throw new Error("PTC tool registry disposed");
+		const controller = new AbortController();
+		const done = Promise.withResolvers();
+		const call = {
+			mode: mode(),
+			controller,
+			done: done.promise
+		};
+		let calls = this.calls.get(sessionId);
+		if (calls === void 0) this.calls.set(sessionId, calls = /* @__PURE__ */ new Set());
+		calls.add(call);
+		try {
+			return await run(AbortSignal.any([signal, controller.signal]));
+		} finally {
+			calls.delete(call);
+			if (calls.size === 0) this.calls.delete(sessionId);
+			done.resolve(void 0);
+		}
+	}
+};
 /**
 * PTC mode `run_code` transport. Programs call the registry's agent-visible
 * tools through nested executions scheduled under the native concurrency
@@ -3028,23 +3388,27 @@ function defineTool(options) {
 */
 /** The model-facing name of the PTC mode tool. */
 const RUN_CODE_NAME = "run_code";
-/**
-* The TypeScript flavor: the fallback for a schema read with no runtime
-* mounted ({@link resolveFlavor} owns which readers reach that). A real
-* assembly always resolves a runtime first, so the model never sees this
-* fallback outside its own language.
-*/
-const TYPESCRIPT_FLAVOR = {
-	description: "Execute a TypeScript program against the available tools. Takes two required arguments: `code`, the BODY of an async function (erasable syntax only; top-level `await` and `return` work), and `description`, a short summary of what the program does. Call tools as `await tools.name(args)` per the declarations in the system prompt. Only what you print or return is program output — curate it. Image-bearing subtool results are attached after the run.",
+/** Keep tool-call rules here; the runtime owns evaluation syntax and state retention. */
+function runCodeFlavor(language, execution = {
+	programDescription: "the program to execute",
+	outputInstruction: "Curate the program output.",
+	codeDescription: `The ${language} program to execute, following this tool's execution instructions.`
+}) {
+	return {
+		description: `Execute a ${language} program against the available tools. Takes two required arguments: \`code\`, ${execution.programDescription}, and \`description\`, a short summary of what the program does. Call tools as \`await tools.name(args)\` per the declarations in the system prompt. ${execution.outputInstruction} Image-bearing subtool results are attached after the run.`,
+		codeDescription: execution.codeDescription
+	};
+}
+const TYPESCRIPT_FLAVOR = runCodeFlavor("TypeScript");
+const TYPESCRIPT_FUNCTION_FLAVOR = runCodeFlavor("TypeScript", {
+	programDescription: "the BODY of an async function (erasable syntax only; top-level `await` and `return` work)",
+	outputInstruction: "Only what you print or return is program output — curate it.",
 	codeDescription: "The program: the body of an async TypeScript function."
-};
+});
 /** Per-language `run_code` schema flavors (see {@link RunCodeFlavor}); one entry per {@link PtcSdkLanguage}. */
 const RUN_CODE_FLAVORS = {
 	typescript: TYPESCRIPT_FLAVOR,
-	python: {
-		description: "Execute a Python program against the available tools. Takes two required arguments: `code`, the BODY of an async function (top-level `await` and `return` work), and `description`, a short summary of what the program does. Call tools as `await tools.name(args)` per the declarations in the system prompt. Use `print(...)` and/or `return <value>` for program output — curate it. Image-bearing subtool results are attached after the run.",
-		codeDescription: "The program: the body of an async Python function."
-	}
+	python: runCodeFlavor("Python")
 };
 /**
 * The `description` parameter's model-facing description: language-independent
@@ -3106,7 +3470,7 @@ function resolveFlavor(peekRuntime) {
 		const known = Object.keys(RUN_CODE_FLAVORS).map((name) => JSON.stringify(name)).join(", ");
 		throw new Error(`dsh-tools: no run_code schema flavor registered for runtime language ${JSON.stringify(runtime.language)} (known: ${known})`);
 	}
-	return flavor;
+	return runtime.language === "typescript" && runtime.programFormat === "function-body" ? TYPESCRIPT_FUNCTION_FLAVOR : flavor;
 }
 /**
 * Thrown by `run_code` when the program run itself failed — a program
@@ -3246,10 +3610,13 @@ function renderValue(value) {
 * @param registry - the owning registry (sub-calls go through its `execute`,
 *   bindings cover its registered tools).
 * @param options - the registry-private capabilities described above.
+* @param ctx - Owning registry context, independent of the calling Agent.
 * @returns the registry-ready definition.
 */
-function createRunCodeTool(registry, options) {
+function createRunCodeTool(registry, options, ctx) {
 	const { requireRuntime, peekRuntime, maxParallel, shapeDispatchLog } = options;
+	const stateOwners = /* @__PURE__ */ new WeakMap();
+	const calls = new PtcCalls(ctx);
 	const definition = defineTool({
 		name: RUN_CODE_NAME,
 		description: TYPESCRIPT_FLAVOR.description,
@@ -3316,263 +3683,287 @@ function createRunCodeTool(registry, options) {
 		async execute(args, exec) {
 			if (args.description.trim().length === 0) throw new Error("invalid description: expected a non-empty string");
 			const runtime = requireRuntime();
-			validateEscalationArgs(args.sandbox_permissions, args.justification);
-			if (args.timeoutMs !== void 0 && runtime.timeout === void 0) throw new Error("timeoutMs is not available for this PTC runtime");
-			if (args.timeoutMs !== void 0 && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) throw new Error("invalid timeoutMs: expected a positive finite number");
-			const standingPolicy = runtime.sandboxMode === void 0 ? void 0 : options.resolveSandboxPolicy(exec);
-			let policy = standingPolicy;
-			if (args.sandbox_permissions !== void 0 && args.justification !== void 0) {
-				if (standingPolicy === void 0) throw new Error("sandbox_permissions is not available for this PTC runtime");
-				const approvedMode = await approveEscalation({
-					requestedMode: args.sandbox_permissions,
-					justification: args.justification,
-					effectiveMode: standingPolicy.mode,
-					subject: "program"
-				}, {
-					approver: options.peekApprover(),
-					agent: exec.agent,
-					callId: exec.callId,
-					toolName: RUN_CODE_NAME,
-					signal: exec.signal
-				});
-				policy = {
-					...standingPolicy,
-					mode: approvedMode
-				};
-			}
-			exec.signal.throwIfAborted();
-			const runController = new AbortController();
-			const onOuterAbort = () => {
-				runController.abort(exec.signal.reason);
-			};
-			exec.signal.addEventListener("abort", onOuterAbort, { once: true });
-			let dispatches = 0;
-			const pendingQueue = [];
-			const inFlight = /* @__PURE__ */ new Set();
-			/** Tracked settle-event side work (log-content listener + append), drained at run settlement. */
-			const logWork = /* @__PURE__ */ new Set();
-			const commitQueue = [];
-			let exclusiveActive = false;
-			let driving = false;
-			let driverRun = Promise.resolve();
-			let wake;
-			const wakeup = () => {
-				const release = wake;
-				wake = void 0;
-				release?.();
-			};
-			/**
-			* The single ordered lane. Each pass commits the head-of-line settled
-			* dispatch (ordered post-execute), then starts the next queued entry if
-			* its slot is free (ordered pre-execute), and otherwise sleeps until a
-			* body settles or a new submission arrives. One run reaching the
-			* empty-queues/empty-pool state is quiescence.
-			*/
-			const drive = () => {
-				if (driving) return driverRun;
-				driving = true;
-				driverRun = (async () => {
-					try {
-						for (;;) {
-							const signal = new Promise((resolve) => {
-								wake = resolve;
-							});
-							const commitHead = commitQueue[0];
-							if (commitHead !== void 0 && commitHead.settled) {
-								commitQueue.shift();
-								await commitHead.commit();
-								if (commitHead.mode === "exclusive") exclusiveActive = false;
-								continue;
-							}
-							const head = pendingQueue[0];
-							if (head !== void 0) {
-								if (runController.signal.aborted) {
-									pendingQueue.shift();
-									head.abandon();
-									continue;
-								}
-								const mode = head.classify();
-								if (!exclusiveActive && (mode === "exclusive" ? inFlight.size === 0 : inFlight.size < maxParallel)) {
-									if (mode === "exclusive") exclusiveActive = true;
-									head.mode = mode;
-									pendingQueue.shift();
-									commitQueue.push(head);
-									await head.start();
-									const flight = head.flight.finally(() => {
-										inFlight.delete(flight);
-										wakeup();
-									});
-									inFlight.add(flight);
-									continue;
-								}
-							}
-							if (pendingQueue.length === 0 && commitQueue.length === 0 && inFlight.size === 0) return;
-							await signal;
-						}
-					} finally {
-						driving = false;
-						wake = void 0;
-					}
-				})();
-				return driverRun;
-			};
-			/** Every dispatch settled AND committed; nothing can start (the run is aborted at call time). */
-			const drainDispatches = async () => {
-				await drive();
-				while (logWork.size > 0) await Promise.allSettled([...logWork]);
-			};
-			const runOver = () => runController.signal.aborted;
-			const binding = (schema) => async (rawArgs) => {
-				const { name } = schema;
-				if (runOver()) throw new Error(`run_code run is over (${String(runController.signal.reason)}); ${name} not dispatched`);
-				const normalized = jsonNormalizeArgs(rawArgs);
-				const n = ++dispatches;
-				const subCallId = brandString(`${String(exec.callId)}:ptc:${n}`);
-				const input = {
-					callId: subCallId,
-					rootCallId: exec.rootCallId,
-					name,
-					schema,
-					arguments: normalized.dispatched,
-					...exec.agent ? { agent: exec.agent } : {},
-					parent: exec.token,
-					signal: runController.signal
-				};
-				const scheduler = registry[TOOL_RUNTIME_SCHEDULER];
-				const outcome = await new Promise((resolve, reject) => {
-					let parked;
-					const settle = (result) => {
-						resolve(result.isError ? {
-							isError: true,
-							message: result.error.message
-						} : {
-							isError: false,
-							value: result.value
-						});
-						const agent = exec.agent;
-						if (agent === void 0) return;
-						const task = (async () => {
-							const logged = await shapeDispatchLog({
-								exec,
-								agent,
-								subCallId,
-								name,
-								isError: result.isError,
-								content: result.content
-							});
-							agent.session.append("tool/ptc-dispatch", {
-								rootCallId: exec.rootCallId,
-								parentCallId: exec.callId,
-								subCallId,
-								name,
-								arguments: normalized.logged,
-								isError: result.isError,
-								...result.error?.info === void 0 ? {} : { error: result.error.info },
-								content: logged
-							});
-						})().finally(() => {
-							logWork.delete(task);
-						});
-						logWork.add(task);
-					};
-					pendingQueue.push({
-						flight: Promise.resolve(),
-						settled: false,
-						classify: () => registry.executionMode(input).kind,
-						abandon: () => {
-							reject(/* @__PURE__ */ new Error(`run_code run is over (${String(runController.signal.reason)}); ${name} tool call abandoned`));
-						},
-						async start() {
-							exec.agent?.session.append("tool/ptc-dispatch-start", {
-								rootCallId: exec.rootCallId,
-								parentCallId: exec.callId,
-								subCallId,
-								name,
-								arguments: normalized.logged
-							});
-							const prepared = await scheduler.prepare(input);
-							if (prepared.kind === "dispatch") {
-								this.flight = scheduler.dispatch(prepared.exec).then((dispatchOutcome) => {
-									parked = {
-										kind: dispatchOutcome.kind,
-										exec: prepared.exec,
-										result: dispatchOutcome.result
-									};
-									this.settled = true;
-								});
-								return;
-							}
-							parked = {
-								kind: prepared.kind,
-								exec: prepared.exec,
-								result: prepared.result
-							};
-							this.settled = true;
-						},
-						async commit() {
-							/* v8 ignore next -- commit() runs only after `settled` flipped, which set parked. */
-							if (parked === void 0) return;
-							const result = parked.kind === "post-result" ? await scheduler.finalize(parked.exec, parked.result) : scheduler.finish(parked.exec, parked.result);
-							if (!result.isError && result.content.some((block) => block.type === "image")) exec.deferContext(createUserMessage({
-								content: result.content,
-								source: { kind: "ptc-mode" }
-							}));
-							for (const context of result.additionalContexts ?? []) exec.deferContext(context);
-							if (result.concludesTurn) exec.concludeTurn();
-							settle(result);
-							while (logWork.size > maxParallel) await Promise.race(logWork);
-						}
+			const run = async (callSignal) => {
+				validateEscalationArgs(args.sandbox_permissions, args.justification);
+				if (args.timeoutMs !== void 0 && runtime.timeout === void 0) throw new Error("timeoutMs is not available for this PTC runtime");
+				if (args.timeoutMs !== void 0 && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) throw new Error("invalid timeoutMs: expected a positive finite number");
+				const standingPolicy = runtime.sandboxMode === void 0 ? void 0 : options.resolveSandboxPolicy(exec);
+				let policy = standingPolicy;
+				if (args.sandbox_permissions !== void 0 && args.justification !== void 0) {
+					if (standingPolicy === void 0) throw new Error("sandbox_permissions is not available for this PTC runtime");
+					const approvedMode = await approveEscalation({
+						requestedMode: args.sandbox_permissions,
+						justification: args.justification,
+						effectiveMode: standingPolicy.mode,
+						subject: "program"
+					}, {
+						approver: options.peekApprover(),
+						agent: exec.agent,
+						callId: exec.callId,
+						toolName: RUN_CODE_NAME,
+						signal: callSignal
 					});
-					wakeup();
-					drive();
-				});
-				if (runOver()) throw new Error(`run_code run is over (${String(runController.signal.reason)}); ${name} result discarded`);
-				if (outcome.isError) throw new Error(outcome.message);
-				return outcome.value;
-			};
-			const functions = Object.create(null);
-			for (const schema of registry.schemas(exec.agent)) {
-				if (schema.name === "run_code") continue;
-				Object.defineProperty(functions, schema.name, {
-					enumerable: true,
-					value: binding(deepFreeze(schema))
-				});
-			}
-			try {
-				let result;
-				try {
-					result = await runtime.run(runtime.resolve({
-						program: args.code,
-						bindings: [{
-							global: "tools",
-							functions,
-							errorClass: {
-								name: "ToolCallError",
-								memberNameProperty: "toolName"
-							}
-						}],
-						signal: runController.signal,
-						...exec.agent?.session.header.cwd !== void 0 ? { cwd: exec.agent.session.header.cwd } : {},
-						...policy !== void 0 ? { sandboxPolicy: policy } : {},
-						...args.timeoutMs !== void 0 ? { timeoutMs: args.timeoutMs } : {}
-					}));
-				} finally {
-					runController.abort("run_code settled");
-					await drainDispatches();
+					policy = {
+						...standingPolicy,
+						mode: approvedMode
+					};
 				}
-				if (result.error) {
-					const logsText = result.logs.length > 0 ? `\nCaptured output:\n${result.logs.join("\n")}` : "";
-					const sandboxText = result.sandbox === void 0 ? "" : `\nFile sandbox: ${result.sandbox.mode}${result.sandbox.enforcement === void 0 ? "" : `; enforcement: ${result.sandbox.enforcement}`}${result.sandbox.denied ? "; operation denied" : ""}.`;
-					throw new CodeRunFailedError(`code run failed (${result.error.kind}): ${result.error.message}${logsText}${sandboxText}${result.sandbox?.denied ? escalationGuidance(runtime) : ""}`);
-				}
-				return {
-					logs: result.logs,
-					...result.sandbox === void 0 ? {} : { sandbox: result.sandbox },
-					...result.value !== void 0 ? { result: result.value } : {}
+				const cwd = await options.resolveWorkingDirectory({
+					...exec,
+					signal: callSignal
+				});
+				callSignal.throwIfAborted();
+				const runController = new AbortController();
+				const onOuterAbort = () => {
+					runController.abort(callSignal.reason);
 				};
-			} finally {
-				exec.signal.removeEventListener("abort", onOuterAbort);
-			}
+				callSignal.addEventListener("abort", onOuterAbort, { once: true });
+				let dispatches = 0;
+				const pendingQueue = [];
+				const inFlight = /* @__PURE__ */ new Set();
+				/** Tracked settle-event side work (log-content listener + append), drained at run settlement. */
+				const logWork = /* @__PURE__ */ new Set();
+				const commitQueue = [];
+				let exclusiveActive = false;
+				let driving = false;
+				let driverRun = Promise.resolve();
+				let wake;
+				const wakeup = () => {
+					const release = wake;
+					wake = void 0;
+					release?.();
+				};
+				/**
+				* The single ordered lane. Each pass commits the head-of-line settled
+				* dispatch (ordered post-execute), then starts the next queued entry if
+				* its slot is free (ordered pre-execute), and otherwise sleeps until a
+				* body settles or a new submission arrives. One run reaching the
+				* empty-queues/empty-pool state is quiescence.
+				*/
+				const drive = () => {
+					if (driving) return driverRun;
+					driving = true;
+					driverRun = (async () => {
+						try {
+							for (;;) {
+								const signal = new Promise((resolve) => {
+									wake = resolve;
+								});
+								const commitHead = commitQueue[0];
+								if (commitHead !== void 0 && commitHead.settled) {
+									commitQueue.shift();
+									await commitHead.commit();
+									if (commitHead.mode === "exclusive") exclusiveActive = false;
+									continue;
+								}
+								const head = pendingQueue[0];
+								if (head !== void 0) {
+									if (runController.signal.aborted) {
+										pendingQueue.shift();
+										head.abandon();
+										continue;
+									}
+									const mode = head.classify();
+									if (!exclusiveActive && (mode === "exclusive" ? inFlight.size === 0 : inFlight.size < maxParallel)) {
+										if (mode === "exclusive") exclusiveActive = true;
+										head.mode = mode;
+										pendingQueue.shift();
+										commitQueue.push(head);
+										await head.start();
+										const flight = head.flight.finally(() => {
+											inFlight.delete(flight);
+											wakeup();
+										});
+										inFlight.add(flight);
+										continue;
+									}
+								}
+								if (pendingQueue.length === 0 && commitQueue.length === 0 && inFlight.size === 0) return;
+								await signal;
+							}
+						} finally {
+							driving = false;
+							wake = void 0;
+						}
+					})();
+					return driverRun;
+				};
+				/** Every dispatch settled AND committed; nothing can start (the run is aborted at call time). */
+				const drainDispatches = async () => {
+					await drive();
+					while (logWork.size > 0) await Promise.allSettled([...logWork]);
+				};
+				const runOver = () => runController.signal.aborted;
+				const binding = (schema) => async (rawArgs) => {
+					const { name } = schema;
+					if (runOver()) throw new Error(`run_code run is over (${String(runController.signal.reason)}); ${name} not dispatched`);
+					const normalized = jsonNormalizeArgs(rawArgs);
+					const n = ++dispatches;
+					const subCallId = brandString(`${String(exec.callId)}:ptc:${n}`);
+					const input = {
+						callId: subCallId,
+						rootCallId: exec.rootCallId,
+						name,
+						schema,
+						arguments: normalized.dispatched,
+						...exec.agent ? { agent: exec.agent } : {},
+						parent: exec.token,
+						signal: runController.signal
+					};
+					const scheduler = registry[TOOL_RUNTIME_SCHEDULER];
+					const outcome = await new Promise((resolve, reject) => {
+						let parked;
+						const settle = (result) => {
+							resolve(result.isError ? {
+								isError: true,
+								message: result.error.message
+							} : {
+								isError: false,
+								value: result.value
+							});
+							const agent = exec.agent;
+							if (agent === void 0) return;
+							const task = (async () => {
+								const logged = await shapeDispatchLog({
+									exec,
+									agent,
+									subCallId,
+									name,
+									isError: result.isError,
+									content: result.content
+								});
+								agent.session.append("tool/ptc-dispatch", {
+									rootCallId: exec.rootCallId,
+									parentCallId: exec.callId,
+									subCallId,
+									name,
+									arguments: normalized.logged,
+									isError: result.isError,
+									...result.error?.info === void 0 ? {} : { error: result.error.info },
+									content: logged,
+									...result.meta === void 0 ? {} : { meta: result.meta }
+								});
+							})().finally(() => {
+								logWork.delete(task);
+							});
+							logWork.add(task);
+						};
+						pendingQueue.push({
+							flight: Promise.resolve(),
+							settled: false,
+							classify: () => registry.executionMode(input).kind,
+							abandon: () => {
+								reject(/* @__PURE__ */ new Error(`run_code run is over (${String(runController.signal.reason)}); ${name} tool call abandoned`));
+							},
+							async start() {
+								exec.agent?.session.append("tool/ptc-dispatch-start", {
+									rootCallId: exec.rootCallId,
+									parentCallId: exec.callId,
+									subCallId,
+									name,
+									arguments: normalized.logged
+								});
+								const prepared = await scheduler.prepare(input);
+								if (prepared.kind === "dispatch") {
+									this.flight = scheduler.dispatch(prepared.exec).then((dispatchOutcome) => {
+										parked = {
+											kind: dispatchOutcome.kind,
+											exec: prepared.exec,
+											result: dispatchOutcome.result
+										};
+										this.settled = true;
+									});
+									return;
+								}
+								parked = {
+									kind: prepared.kind,
+									exec: prepared.exec,
+									result: prepared.result
+								};
+								this.settled = true;
+							},
+							async commit() {
+								/* v8 ignore next -- commit() runs only after `settled` flipped, which set parked. */
+								if (parked === void 0) return;
+								const result = parked.kind === "post-result" ? await scheduler.finalize(parked.exec, parked.result) : scheduler.finish(parked.exec, parked.result);
+								if (!result.isError && result.content.some((block) => block.type === "image")) exec.deferContext(createUserMessage({
+									content: result.content,
+									source: { kind: "ptc-mode" }
+								}));
+								for (const context of result.additionalContexts ?? []) exec.deferContext(context);
+								if (result.concludesTurn) exec.concludeTurn();
+								settle(result);
+								while (logWork.size > maxParallel) await Promise.race(logWork);
+							}
+						});
+						wakeup();
+						drive();
+					});
+					if (runOver()) throw new Error(`run_code run is over (${String(runController.signal.reason)}); ${name} result discarded`);
+					if (outcome.isError) throw new Error(outcome.message);
+					return outcome.value;
+				};
+				const functions = Object.create(null);
+				for (const schema of registry.schemas(exec.agent)) {
+					if (schema.name === "run_code") continue;
+					Object.defineProperty(functions, schema.name, {
+						enumerable: true,
+						value: binding(deepFreeze(schema))
+					});
+				}
+				try {
+					let result;
+					try {
+						if (exec.agent !== void 0) {
+							const agent = exec.agent;
+							let runtimes = stateOwners.get(agent);
+							if (runtimes === void 0) stateOwners.set(agent, runtimes = /* @__PURE__ */ new WeakSet());
+							let provider = runtime;
+							for (;;) {
+								const original = provider[symbols.original];
+								if (original === void 0) break;
+								provider = original;
+							}
+							if (!runtimes.has(provider)) {
+								agent.ctx.effect(() => () => runtime.release(agent), "PTC retained environment");
+								runtimes.add(provider);
+							}
+						}
+						result = await runtime.run(runtime.resolve({
+							program: args.code,
+							...exec.agent === void 0 || policy?.mode !== standingPolicy?.mode ? {} : { stateOwner: exec.agent },
+							bindings: [{
+								global: "tools",
+								functions,
+								errorClass: {
+									name: "ToolCallError",
+									memberNameProperty: "toolName"
+								}
+							}],
+							signal: runController.signal,
+							...cwd !== void 0 ? { cwd } : {},
+							...policy !== void 0 ? { sandboxPolicy: policy } : {},
+							...args.timeoutMs !== void 0 ? { timeoutMs: args.timeoutMs } : {}
+						}));
+					} finally {
+						runController.abort("run_code settled");
+						await drainDispatches();
+					}
+					if (result.error) {
+						const logsText = result.logs.length > 0 ? `\nCaptured output:\n${result.logs.join("\n")}` : "";
+						const sandboxText = result.sandbox === void 0 ? "" : `\nFile sandbox: ${result.sandbox.mode}${result.sandbox.enforcement === void 0 ? "" : `; enforcement: ${result.sandbox.enforcement}`}${result.sandbox.denied ? "; operation denied" : ""}.`;
+						throw new CodeRunFailedError(`code run failed (${result.error.kind}): ${result.error.message}${logsText}${sandboxText}${result.sandbox?.denied ? escalationGuidance(runtime) : ""}`);
+					}
+					return {
+						logs: result.logs,
+						...result.sandbox === void 0 ? {} : { sandbox: result.sandbox },
+						...result.value !== void 0 ? { result: result.value } : {}
+					};
+				} finally {
+					callSignal.removeEventListener("abort", onOuterAbort);
+				}
+			};
+			return runtime.sandboxMode === void 0 || exec.agent === void 0 ? run(exec.signal) : calls.run(exec.agent.session.id, exec.signal, () => options.resolveSandboxPolicy(exec).mode, run);
 		},
 		presentCall: (args) => ({
 			card: "generic",
@@ -3586,7 +3977,7 @@ function createRunCodeTool(registry, options) {
 		get: () => {
 			const runtime = peekRuntime();
 			const instructions = runtime?.executionInstructions;
-			return resolveFlavor(peekRuntime).description + (instructions ? ` ${instructions}` : "") + (runtime === void 0 ? "" : " The working directory is the Session's current directory.") + escalationGuidance(runtime);
+			return resolveFlavor(peekRuntime).description + (instructions ? ` ${instructions}` : "") + (runtime === void 0 ? "" : " Each program starts in the Session's current directory. Running programs keep their initial directory.") + escalationGuidance(runtime);
 		}
 	});
 	Object.defineProperty(definition, "parameters", {
@@ -3815,24 +4206,29 @@ function jsonSchemaToTs(schema, indent = 0) {
 		return "unknown";
 	}
 }
-/** The fixed model-facing usage contract rendered above the declarations (see the PTC mode Agent Note's "What the model sees"). */
-const SDK_INSTRUCTIONS$1 = `## Writing code for run_code
+/** Render the argument and call instructions for the selected execution syntax. */
+function renderSdkInstructions(programFormat) {
+	return `## Writing code for run_code
 
-\`run_code\` takes two required arguments: \`code\` — the body of an async TypeScript function (erasable syntax only — no \`enum\` or namespaces; type annotations are advisory, the code runs type-stripped) — and \`description\`, a short summary of what the program does. The declarations below are SDK bindings for this program. A declaration does not make its name a directly callable tool; only names supplied as separate tool schemas may be called directly.`;
-const SDK_PROGRAM_INSTRUCTIONS = `Inside the program:
+\`run_code\` takes two required arguments: \`code\`, ${programFormat === "function-body" ? "the body of an async TypeScript function (erasable syntax only — no `enum` or namespaces; type annotations are advisory, the code runs type-stripped)" : "the program to execute"}, and \`description\`, a short summary of what the program does. The declarations below are SDK bindings for this program. A declaration does not make its name a directly callable tool; only names supplied as separate tool schemas may be called directly.`;
+}
+/** Render tool execution and output instructions for the selected execution syntax. */
+function renderSdkProgramInstructions(programFormat) {
+	return `Inside the program:
 
 - Call tools as \`await tools.name(args)\` — quoted access for exotic names: \`tools["my-tool"](args)\`. Every call resolves to the tool's typed canonical JSON value. Tool arguments must be lossless JSON.
 - A FAILED tool call rejects with \`ToolCallError\`, whose \`toolName\` identifies the failed tool and whose \`message\` is human-readable — \`try/catch\` it to handle and continue.
 - Independent read-only calls MAY overlap under \`Promise.all\` (safe calls run concurrently; mutating calls run alone, in submission order). Sequence dependent work with \`await\`.
-- Emit results with \`return\` and/or \`console.log(...)\`. Only what you print or return is program output. A successful tool result containing an image is attached after the run so you can inspect it on the next step; every other intermediate result stays out of the conversation, so extract just what you need.
+- ${programFormat === "function-body" ? "Emit results with `return` and/or `console.log(...)`. Only what you print or return is program output." : "Only values emitted as program output enter the conversation."} A successful tool result containing an image is attached after the run so you can inspect it on the next step; every other intermediate result stays out of the conversation, so extract just what you need.
 
 Program-only SDK bindings:`;
+}
 /** Whether one string schema accepts the literal used by the bash example. */
 function acceptsExampleString(schema, value) {
 	return schema?.type === "string" && (schema.const === void 0 || schema.const === value) && (schema.enum === void 0 || schema.enum.includes(value));
 }
 /** Render the bash example only when its literal arguments satisfy the current parameter schema. */
-function renderBashExample(schemas) {
+function renderBashExample(schemas, programFormat) {
 	const bash = schemas.find((schema) => schema.name === "bash");
 	if (bash === void 0) return "";
 	const parameters = bash.parameters;
@@ -3842,7 +4238,8 @@ function renderBashExample(schemas) {
 	if (!acceptsExampleString(parameters.properties?.command, "pwd")) return "";
 	const needsDescription = required.includes("description");
 	if (needsDescription && !acceptsExampleString(parameters.properties?.description, "Show current directory")) return "";
-	return ` When no separate \`bash\` schema is supplied, invoke a declared \`bash\` binding inside \`run_code\`:\n\n\`run_code({ code: "return await tools.bash({ command: 'pwd'${needsDescription ? ", description: 'Show current directory'" : ""} })", description: "Show current directory" })\``;
+	const description = needsDescription ? "description: 'Show current directory', " : "";
+	return ` When no separate \`bash\` schema is supplied, invoke a declared \`bash\` binding inside \`run_code\`:\n\n\`run_code({ code: "${programFormat === "function-body" ? `return await tools.bash({ ${description}command: 'pwd' })` : `console.log(await tools.bash({ ${description}command: 'pwd' }))`}", description: "Show current directory" })\``;
 }
 /**
 * Render the full `tools:sdk` prompt section: the fixed usage instructions
@@ -3854,9 +4251,10 @@ function renderBashExample(schemas) {
 * by name, so the input never carries a duplicate.
 * @param schemas - the tool schemas to declare (the caller excludes
 *   `run_code` itself).
+* @param programFormat - Runtime syntax; function bodies support returning a result, REPLs print it.
 * @returns the complete section text.
 */
-function renderToolsSdk(schemas) {
+function renderToolsSdk(schemas, programFormat = "function-body") {
 	const sorted = [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 	const argsMembers = [];
 	const outputMembers = [];
@@ -3881,7 +4279,10 @@ function renderToolsSdk(schemas) {
 			"}"
 		].join("\n")
 	].join("\n\n");
-	return `${SDK_INSTRUCTIONS$1}${renderBashExample(sorted)}\n\n${SDK_PROGRAM_INSTRUCTIONS}\n\n\`\`\`ts\ntype JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }\n\n${declaration}\n\`\`\``;
+	const jsonValue = "type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }";
+	const instructions = renderSdkInstructions(programFormat);
+	const programInstructions = renderSdkProgramInstructions(programFormat);
+	return `${instructions}${renderBashExample(sorted, programFormat)}\n\n${programInstructions}\n\n\`\`\`ts\n${jsonValue}\n\n${declaration}\n\`\`\``;
 }
 /**
 * PTC mode codegen — Python flavor. The pure projection from registered tool schemas to the
@@ -3892,8 +4293,7 @@ function renderToolsSdk(schemas) {
 *
 * Under `mode: 'ptc'` the native tool schemas are omitted from the request, so this generated
 * SDK is the model's ONLY source for each tool's argument names, required fields, types,
-* descriptions, and canonical output shapes; under `mode: 'both'` the native schemas ship
-* alongside it and it is one of two. Object-shaped arguments and outputs therefore render as one
+* descriptions, and canonical output types. Object-shaped arguments and outputs render as one
 * named `TypedDict` per tool (and per nested object), not an opaque `dict[str, Any]`, so the
 * shape survives into the program under the mode that has nothing else to carry it.
 * @module @deepseek-ai/dsh-tools/src/py-types
@@ -4511,12 +4911,12 @@ function renderType(schema, className, state) {
 /** The fixed model-facing usage contract rendered above the declarations. */
 const SDK_INSTRUCTIONS = `## Writing code for run_code
 
-\`run_code\` takes two required arguments: \`code\` — the body of an async Python function (top-level \`await\` and \`return\` both work) — and \`description\`, a short summary of what the program does. At run time exactly two of the names declared below are bound: \`tools\` and \`ToolCallError\`. Everything else is a STATIC STUB describing argument and return types — in particular the \`TypedDict\` classes do NOT exist at run time, so build arguments as plain \`dict\`/\`list\` JSON values: \`await tools.name({"field": 1})\`, never \`FooArgs(field=1)\`, which raises \`NameError\`. Inside the program:
+\`run_code\` takes two required arguments: \`code\`, the program to execute, and \`description\`, a short summary of what the program does. At run time exactly two of the names declared below are bound: \`tools\` and \`ToolCallError\`. Everything else is a STATIC STUB describing argument and return types — in particular the \`TypedDict\` classes do NOT exist at run time, so build arguments as plain \`dict\`/\`list\` JSON values: \`await tools.name({"field": 1})\`, never \`FooArgs(field=1)\`, which raises \`NameError\`. Inside the program:
 
 - Call tools as \`await tools.name(args)\` — subscript access for exotic, reserved, or underscore-leading names: \`await tools["my-tool"](args)\`. Every call resolves to the tool's typed canonical JSON value (each method's return type below). Tool arguments must be lossless JSON.
 - A FAILED tool call raises \`ToolCallError\`, whose \`toolName\` identifies the failed tool and whose message is human-readable — wrap in \`try/except\` to handle and continue.
 - Independent read-only calls MAY overlap under \`asyncio.gather\` (safe calls run concurrently; mutating calls run alone, in submission order). Sequence dependent work with \`await\`.
-- Emit the run's answer with \`print(...)\` and/or a top-level \`return <value>\`; the returned value must be lossless JSON. Only what you print and return is program output. A successful tool result containing an image is attached after the run so you can inspect it on the next step; every other intermediate result stays out of the conversation, so extract just what you need.
+- Only values emitted as program output enter the conversation. A successful tool result containing an image is attached after the run so you can inspect it on the next step; every other intermediate result stays out of the conversation, so extract just what you need.
 
 The available tools:`;
 /**
@@ -4738,11 +5138,7 @@ function resolveMaxParallelSubCalls(value) {
 (class extends Service {
 	static inject = ["systemPrompt"];
 	static Config = z.object({
-		mode: z.union([
-			"native",
-			"ptc",
-			"both"
-		]).default("native"),
+		mode: z.union(["native", "ptc"]).default("native"),
 		maxParallelSubCalls: z.natural().min(1).default(10)
 	});
 	/** Internal staged view consumed by `dsh-agent-loop`'s parallel scheduler. */
@@ -4772,11 +5168,13 @@ function resolveMaxParallelSubCalls(value) {
 	* Reserved presentation transport, kept outside the filterable registration
 	* layers. Built on first need rather than at construction: which agents run
 	* a PTC mode is no longer known when the service is constructed, and the
-	* transport is stateless beyond its closures over `this`.
+	* transport owns its PTC call tracking and state-owner registrations.
 	*/
 	ptcTransport;
+	ptcContext;
 	constructor(ctx, config = {}) {
 		super(ctx, "tools");
+		this.ptcContext = ctx;
 		this.defaultMode = config.mode ?? "native";
 		this.maxParallelSubCalls = resolveMaxParallelSubCalls(config.maxParallelSubCalls);
 		ctx.systemPrompt.tools((context) => this.wireSchemas(context.scope));
@@ -4797,7 +5195,7 @@ function resolveMaxParallelSubCalls(value) {
 	* the deployment is inconsistent. Its order places the rule before that
 	* guidance rather than after it.
 	*
-	* `both` renders empty: native calls do execute there, so the rule is false.
+	* Native scopes render no instruction.
 	* @returns the section registration.
 	*/
 	collapseSection() {
@@ -4829,7 +5227,7 @@ function resolveMaxParallelSubCalls(value) {
 				const render = SDK_RENDERERS[runtime.language];
 				/* v8 ignore next -- requirePtcRuntime rejects an unknown language before this runs. */
 				if (render === void 0) throw new Error(`dsh-tools: no SDK renderer for ${runtime.language}`);
-				return render(this.sdkSchemas(context.scope));
+				return render(this.sdkSchemas(context.scope), runtime.programFormat);
 			}
 		};
 	}
@@ -4858,6 +5256,12 @@ function resolveMaxParallelSubCalls(value) {
 	*/
 	requirePtcTransport() {
 		this.ptcTransport ??= createRunCodeTool(this, {
+			resolveWorkingDirectory: async (exec) => {
+				if (exec.agent === void 0) return void 0;
+				const directories = this.ctx.get("workingDirectory");
+				if (directories === void 0) throw new Error("dsh-tools: run_code with an Agent requires workingDirectory");
+				return directories.ensure(exec.agent, exec.signal);
+			},
 			requireRuntime: () => this.requirePtcRuntime(this.defaultMode),
 			peekApprover: () => this.ctx.get("approval"),
 			resolveSandboxPolicy: (exec) => {
@@ -4868,7 +5272,7 @@ function resolveMaxParallelSubCalls(value) {
 			peekRuntime: () => this.ctx.get("ptcRuntime"),
 			maxParallel: this.maxParallelSubCalls,
 			shapeDispatchLog: (dispatch) => this.shapeDispatchLog(dispatch)
-		});
+		}, this.ptcContext);
 		return this.ptcTransport;
 	}
 	/**
@@ -4911,14 +5315,9 @@ function resolveMaxParallelSubCalls(value) {
 			knownNames: [...view.knownNames]
 		};
 		this.requirePtcRuntime(mode);
-		const schemas = [...view.visible.values()].map((definition) => this.schemaOf(definition, false));
-		if (mode === "ptc") return {
-			schemas: schemas.filter((schema) => schema.name === RUN_CODE_NAME),
-			knownNames: [RUN_CODE_NAME]
-		};
 		return {
-			schemas,
-			knownNames: [...view.knownNames, RUN_CODE_NAME]
+			schemas: [...view.visible.values()].map((definition) => this.schemaOf(definition, false)).filter((schema) => schema.name === RUN_CODE_NAME),
+			knownNames: [RUN_CODE_NAME]
 		};
 	}
 	/**
@@ -5626,7 +6025,7 @@ function resolveMaxParallelSubCalls(value) {
 		}
 		const content = snapshotProjection(tool.name, "render", rendered);
 		let meta;
-		if (exec.parent === void 0 && tool.output.presentationMeta !== void 0) {
+		if (tool.output.presentationMeta !== void 0) {
 			let projected;
 			try {
 				projected = tool.output.presentationMeta(exec.arguments, value);
@@ -5795,56 +6194,22 @@ function toolAbortedBeforeDispatchResult(prior) {
 function SessionId(id) {
 	return brandString(id);
 }
-//#endregion
-//#region ../node_modules/@deepseek-ai/dsh-home-paths/lib/index.js
 /**
-* Shared filesystem path helpers for DeepSeek Harness user data.
-*
-* @module @deepseek-ai/dsh-home-paths
+* Deep structural equality over the session-event JSON value domain
+* (null/boolean/number/string, arrays, plain objects). Replaces
+* `node:util`'s isDeepStrictEqual to keep this module browser-safe.
 */
-/** Directory name for the default DeepSeek Harness home under the OS home. */
-const DSH_HOME_DIR_NAME = ".dsh";
-/** Environment variable that overrides the default DeepSeek Harness home. */
-const DSH_HOME_ENV = "DSH_HOME";
-/**
-* Resolve the default DeepSeek Harness home using Node's platform path rules.
-* @returns the absolute default harness home path.
-*/
-function defaultDshHome() {
-	return join(homedir(), DSH_HOME_DIR_NAME);
-}
-/**
-* Expand supported tilde prefixes against the operating-system home.
-* @param path - configured path that may begin with `~`, `~/`, or `~\`.
-* @returns the expanded path, or the original value when no supported prefix is present.
-*/
-function expandHomePath(path) {
-	if (path === "~") return homedir();
-	if (path.startsWith("~/") || path.startsWith("~\\")) return join(homedir(), path.slice(2));
-	return path;
-}
-/**
-* Resolve the single-root DeepSeek Harness home.
-*
-* Precedence, highest first: an explicit configured path, `$DSH_HOME`, then
-* `~/.dsh`. The harness keeps all user data under one root. An empty or
-* whitespace-only `$DSH_HOME` is treated as unset, so a blank override never
-* resolves the home to the current working directory.
-* @param configured - explicit harness-home override, which has highest precedence.
-* @param env - environment mapping used to read `DSH_HOME`.
-* @returns the normalized absolute harness home path.
-*/
-function resolveDshHome(configured, env = process.env) {
-	const fromEnv = env[DSH_HOME_ENV];
-	return resolve(expandHomePath(configured ?? (fromEnv !== void 0 && fromEnv.trim().length > 0 ? fromEnv : defaultDshHome())));
-}
-/**
-* Join path segments onto the resolved DeepSeek Harness home.
-* @param segments - path segments appended to the Harness home; an empty list returns the home itself.
-* @returns the normalized absolute joined path.
-*/
-function dshHomePath(...segments) {
-	return join(resolveDshHome(), ...segments);
+function isDeepEqualJson(a, b) {
+	if (a === b) return true;
+	if (Array.isArray(a) || Array.isArray(b)) {
+		if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+		return a.every((item, i) => isDeepEqualJson(item, b[i]));
+	}
+	if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+	const aKeys = Object.keys(a);
+	const bRecord = b;
+	if (aKeys.length !== Object.keys(b).length) return false;
+	return aKeys.every((key) => Object.hasOwn(b, key) && isDeepEqualJson(a[key], bRecord[key]));
 }
 //#endregion
 //#region ../.build/agent-memory/tsc/storage.js

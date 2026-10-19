@@ -534,6 +534,26 @@ export class AgentBrowserController {
   }
 
   /**
+   * Delete an authored agent: its preset directory, its combined presets, and
+   * every chat it owned (the host side detaches idle agents first). Returns to
+   * the roster because the page it was showing no longer exists.
+   * @param id - the agent to delete.
+   * @returns the failure message, or undefined on success.
+   */
+  async deleteAgent(id: string): Promise<WireFailure> {
+    this.set({ busy: true, error: null })
+    const removed = await this.agentPresetAuthoring.delete({ agentPreset: id })
+    if (!removed.ok) {
+      const message = removed.error.message
+      this.set({ busy: false, error: message })
+      return message
+    }
+    await this.load()
+    this.set({ busy: false, view: 'roster', selected: '', profile: null, error: null })
+    return undefined
+  }
+
+  /**
    * Rebind every blank session whose bound preset no longer exists back to
    * the deployment default. A blank left pointing at a deleted combined
    * preset breaks the official session-creation flow (it composes the

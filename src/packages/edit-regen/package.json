@@ -1,7 +1,7 @@
 {
   "name": "@istarry/dsh-edit-regen",
   "description": "Standalone session-side verbs for the edit-and-regenerate surface: authorized file-attachment reads, the rewrite fork-boundary lookup, and durable session-shell cleanup",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "publishConfig": {
     "access": "public"
   },

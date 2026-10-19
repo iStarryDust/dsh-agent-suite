@@ -5376,6 +5376,36 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 				});
 			}
 			/**
+			* Delete an authored agent: its preset directory, its combined presets, and
+			* every chat it owned (the host side detaches idle agents first). Returns to
+			* the roster because the page it was showing no longer exists.
+			* @param id - the agent to delete.
+			* @returns the failure message, or undefined on success.
+			*/
+			async deleteAgent(id) {
+				this.set({
+					busy: true,
+					error: null
+				});
+				const removed = await this.agentPresetAuthoring.delete({ agentPreset: id });
+				if (!removed.ok) {
+					const message = removed.error.message;
+					this.set({
+						busy: false,
+						error: message
+					});
+					return message;
+				}
+				await this.load();
+				this.set({
+					busy: false,
+					view: "roster",
+					selected: "",
+					profile: null,
+					error: null
+				});
+			}
+			/**
 			* Rebind every blank session whose bound preset no longer exists back to
 			* the deployment default. A blank left pointing at a deleted combined
 			* preset breaks the official session-creation flow (it composes the
@@ -6401,13 +6431,15 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 		* @param props - the agents store hook, save action, locale.
 		* @returns the bare profile fields page.
 		*/
-		function ProfileMainPage({ useAgents, saveEdit, t }) {
+		function ProfileMainPage({ useAgents, saveEdit, deleteAgent, t }) {
 			const state = useAgents((snapshot) => snapshot);
 			const profile = state.profile;
 			const [name, setName] = (0, react.useState)("");
 			const [language, setLanguage] = (0, react.useState)("");
 			const [description, setDescription] = (0, react.useState)("");
 			const [persona, setPersona] = (0, react.useState)("");
+			/** 删除需要二次确认：第一次点击变成「确认删除」，再点才真正执行。 */
+			const [confirmDelete, setConfirmDelete] = (0, react.useState)(false);
 			(0, react.useEffect)(() => {
 				if (profile === null || profile === void 0) return;
 				setName(profile.name);
@@ -6423,6 +6455,14 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 					description: description.trim(),
 					persona
 				});
+			};
+			const remove = () => {
+				if (!confirmDelete) {
+					setConfirmDelete(true);
+					return;
+				}
+				setConfirmDelete(false);
+				deleteAgent(state.selected);
 			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 				className: AgentBrowser_module_css_default.createPage,
@@ -6489,12 +6529,25 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 								disabled: state.busy
 							})]
 						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: AgentForm_module_css_default.submit,
-							disabled: state.busy,
-							onClick: save,
-							children: t("agents.memory.save")
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: AgentForm_module_css_default.actions,
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: AgentForm_module_css_default.delete,
+									disabled: state.busy,
+									onClick: remove,
+									children: confirmDelete ? t("form.delete.confirm") : t("form.delete")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: AgentForm_module_css_default.actionsSpacer }),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: AgentForm_module_css_default.submit,
+									disabled: state.busy,
+									onClick: save,
+									children: t("agents.memory.save")
+								})
+							]
 						})
 					]
 				})
@@ -8274,6 +8327,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 			"form.language.placeholder": "例如：中文",
 			"form.persona": "人格提示词（需填写agent名字）",
 			"form.persona.placeholder": "描述这个 Agent 的名字、性格、擅长领域、说话方式…",
+			"form.delete": "删除 Agent",
+			"form.delete.confirm": "确认删除（不可恢复）",
 			"form.submit": "确定",
 			"form.cancel": "取消",
 			"form.delete": "删除",
@@ -8411,6 +8466,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 			"form.language.placeholder": "e.g. Chinese",
 			"form.persona": "Persona (must include the agent name)",
 			"form.persona.placeholder": "Describe the agent's name, personality, strengths, tone…",
+			"form.delete": "Delete agent",
+			"form.delete.confirm": "Confirm delete (cannot be undone)",
 			"form.submit": "Confirm",
 			"form.cancel": "Cancel",
 			"form.delete": "Delete",
@@ -8765,6 +8822,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 					},
 					create: (input) => controller.create(input),
 					saveEdit: (id, input) => controller.saveEdit(id, input),
+					deleteAgent: (id) => controller.deleteAgent(id),
 					remove: (id) => controller.remove(id),
 					renameSession: (sessionId, title) => controller.renameSession(sessionId, title),
 					archiveSession: (sessionId) => controller.archiveSession(sessionId),
@@ -8860,7 +8918,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 				locale: NS,
 				inject: () => ({
 					hooks: { agents: controller.store },
-					saveEdit: (id, input) => controller.saveEdit(id, input)
+					saveEdit: (id, input) => controller.saveEdit(id, input),
+					deleteAgent: (id) => controller.deleteAgent(id)
 				})
 			}, ProfileMainPage));
 			ctx.slots.inject("main", () => ctx.slots.register({

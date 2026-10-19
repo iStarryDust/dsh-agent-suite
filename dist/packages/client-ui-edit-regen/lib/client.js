@@ -61,6 +61,13 @@ window.__ModuleLoader__.load({
 		* the agent is idle and the session is not a subagent; images and files in
 		* the message stay individually removable and new ones attach.
 		*/
+		/**
+		* 0.2.1 的 primitives 删掉了 `projectUserText`（旧版负责把 @引用与斜杠命令渲染成高亮片段）。
+		* 这里降级为纯文本渲染：消息内容完整显示，只是引用标签不再单独高亮。
+		*/
+		function projectUserText(text) {
+			return text;
+		}
 		function contentParts(content) {
 			const texts = [];
 			const attachments = [];
@@ -236,10 +243,7 @@ window.__ModuleLoader__.load({
 						}),
 						showBubble && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: EditRegen_module_css_default.bubble,
-							children: [(0, _deepseek_ai_dsh_client_ui_primitives.projectUserText)(text, node.referenceLabels ?? [], node.skillNames ?? [], "skill", {
-								openFile,
-								openSkill
-							}), rest.map((block, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.JsonBlock, {
+							children: [projectUserText(text), rest.map((block, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.JsonBlock, {
 								label: chatT("message.extraBlock"),
 								payload: block,
 								truncatedLabel: truncated

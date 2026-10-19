@@ -1,7 +1,7 @@
 {
   "name": "@istarry/dsh-client-ui-agents",
   "description": "Agent identity browser: roster, profile forms, per-agent memory, and chat history",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "publishConfig": {
     "access": "public"
   },

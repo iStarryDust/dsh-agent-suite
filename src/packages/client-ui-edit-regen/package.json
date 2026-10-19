@@ -1,7 +1,7 @@
 {
   "name": "@istarry/dsh-client-ui-edit-regen",
   "description": "Edit-and-regenerate surface: an inline editor on durable user messages that forks the session and resends the edited prompt",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "publishConfig": {
     "access": "public"
   },

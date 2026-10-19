@@ -16,8 +16,13 @@ import { PERSONA_ROW_ID, type CompositionRow } from './storage.ts'
 /** The persona plugin's package name. */
 const PERSONA_PLUGIN_NAME = '@deepseek-ai/dsh-persona'
 
-/** The working-directory suffix template; `{{cwd}}` resolves per session. */
-const WORKING_DIRECTORY_SUFFIX = 'Your working directory is {{cwd}}.'
+/**
+ * The working-directory suffix template.
+ *
+ * 0.2.1 起 persona 模板不再注册 `{{cwd}}` 变量（会报 unknown prompt variable），
+ * 工作目录已由宿主的 `working-directory` 消息源注入，所以这里不再内插变量。
+ */
+const WORKING_DIRECTORY_SUFFIX = 'Your working directory is the session working directory.'
 
 /** The identity fields the persona row folds in. */
 export interface PersonaInput {

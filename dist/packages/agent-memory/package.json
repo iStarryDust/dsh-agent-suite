@@ -1,7 +1,7 @@
 {
   "name": "@istarry/dsh-agent-memory",
   "description": "Global and per-agent long-term memory under the harness home",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "publishConfig": {
     "access": "public"
   },

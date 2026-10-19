@@ -1,13 +1,14 @@
 import { createRequire } from "node:module";
-import { Context, Service, composeError, resolveConfig } from "@deepseek-ai/cordis";
-import { join, resolve } from "node:path";
-import z from "@deepseek-ai/schemastery";
-import * as yaml from "js-yaml";
-import { dump, load } from "js-yaml";
+import { Context, Service } from "@deepseek-ai/cordis";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
-import "node:timers/promises";
-import "node:url";
-import { homedir } from "node:os";
+import { join } from "node:path";
+import z from "@deepseek-ai/schemastery";
+import { dump, load } from "js-yaml";
+import { entryListSchema } from "@deepseek-ai/cordis-plugin-include";
+import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
+import "@deepseek-ai/dsh-scope";
+import { AttachmentError } from "@deepseek-ai/dsh-attachment";
 import { writeFileAtomic } from "@deepseek-ai/dsh-atomic-write";
 import { z as z$1 } from "zod";
 //#region ../node_modules/@deepseek-ai/dsh-typert-protocol/lib/index.js
@@ -60,7 +61,7 @@ const REMOTE_METHOD_DESCRIPTOR = "@deepseek-ai/dsh-typert-protocol/remote-method
 * a Host composition to read it.
 * @param service - owning Service instance, normally `this`.
 * @param serviceKey - exact Cordis service key.
-* @param options - optional distinct wire namespace.
+* @param options - optional wire namespace.
 * @returns a frozen, inspectable binding with no compiler-injected metadata.
 */
 function bindTypertRemote(service, serviceKey, options = {}) {
@@ -68,7 +69,7 @@ function bindTypertRemote(service, serviceKey, options = {}) {
 	const namespace = options.namespace ?? serviceKey;
 	validateName("namespace", namespace);
 	const ctx = Reflect.get(service, "ctx");
-	if (ctx instanceof Context) provideInvocationAccessor(ctx);
+	if (Context.is(ctx)) provideInvocationAccessor(ctx);
 	return Object.freeze({
 		service,
 		serviceKey,
@@ -83,7 +84,7 @@ var TypertRemoteService = class extends Service {
 	* Register the Service and bind the same key to Typert Gateway.
 	* @param ctx - owning Cordis Context.
 	* @param serviceKey - exact Cordis service key and default wire namespace.
-	* @param options - optional distinct wire namespace.
+	* @param options - optional wire namespace.
 	*/
 	constructor(ctx, serviceKey, options = {}) {
 		super(ctx, serviceKey);
@@ -103,21 +104,42 @@ function provideInvocationAccessor(ctx) {
 function Remote(methodExportOrOptions, context) {
 	if (typeof methodExportOrOptions === "string") {
 		validateName("Remote export name", methodExportOrOptions);
-		return remoteDecorator({ kind: "direct" }, void 0, methodExportOrOptions);
+		return remoteDecorator({ kind: "direct" }, { exportName: methodExportOrOptions });
 	}
-	if (typeof methodExportOrOptions === "object") {
-		if (remoteOptionMode(methodExportOrOptions) !== "stream" || Reflect.ownKeys(methodExportOrOptions).length !== 1) throw new TypeError("typert-protocol: Remote options must contain exactly mode: \"stream\"");
-		return remoteDecorator({ kind: "direct" }, "stream");
-	}
+	if (typeof methodExportOrOptions === "object") return remoteDecorator({ kind: "direct" }, markerOptions(methodExportOrOptions, REMOTE_OPTION_KEYS, "Remote options require name, mode: \"stream\", or resources"));
 	if (context === void 0) throw new TypeError("typert-protocol: Remote decorator context is missing");
 	addMarkerInitializer(context, { kind: "direct" });
 }
-function remoteOptionMode(options) {
-	return Reflect.get(options, "mode");
+const REMOTE_OPTION_KEYS = /* @__PURE__ */ new Set([
+	"name",
+	"mode",
+	"resources"
+]);
+/** Validate one decorator options object against its accepted keys and select the marker fields. */
+function markerOptions(options, accepted, requirement) {
+	const keys = Reflect.ownKeys(options);
+	if (keys.length === 0 || keys.some((key) => typeof key !== "string" || !accepted.has(key)) || Object.hasOwn(options, "mode") && options.mode !== "stream") throw new TypeError(`typert-protocol: ${requirement}`);
+	const { mode, name, resources } = options;
+	if (name !== void 0) validateName("Remote export name", name);
+	return {
+		...mode === void 0 ? {} : { mode },
+		...name === void 0 ? {} : { exportName: name },
+		...resources === void 0 ? {} : { resources: resourceReaders(resources) }
+	};
 }
-function remoteDecorator(invocation, mode, exportName) {
+/** Freeze declared readers into the marker record; a misdeclared reader fails at decoration. */
+function resourceReaders(resources) {
+	const readers = {};
+	for (const [kind, reader] of Object.entries(resources)) {
+		if (typeof reader !== "function") throw new TypeError(`typert-protocol: Remote resource reader "${kind}" must be a function`);
+		readers[kind] = reader;
+	}
+	if (Object.keys(readers).length === 0) throw new TypeError("typert-protocol: Remote resources require at least one reader");
+	return Object.freeze(readers);
+}
+function remoteDecorator(invocation, options = {}) {
 	return function(_method, context) {
-		addMarkerInitializer(context, invocation, mode, exportName);
+		addMarkerInitializer(context, invocation, options);
 	};
 }
 function readRemoteMethodDescriptor(prototype) {
@@ -131,26 +153,27 @@ function readRemoteMethodDescriptor(prototype) {
 	if (!Array.isArray(methods)) throw new TypeError("typert-protocol: Remote method descriptor methods must be an array");
 	return descriptor;
 }
-function addMarkerInitializer(context, invocation, mode, exportName) {
+function addMarkerInitializer(context, invocation, options = {}) {
 	if (context.private || context.static || typeof context.name !== "string") throw new TypeError("typert-protocol: Remote decorators require a public instance method with a string name");
 	const method = context.name;
 	context.addInitializer(function() {
 		const prototype = Object.getPrototypeOf(this);
 		if (prototype === null) throw new TypeError(`typert-protocol: cannot mark Remote method "${method}" on an object without a prototype`);
-		mark(prototype, method, invocation, mode, exportName);
+		mark(prototype, method, invocation, options);
 	});
 }
-function mark(prototype, method, invocation, mode, exportName) {
+function mark(prototype, method, invocation, { mode, exportName, resources }) {
 	const descriptor = readRemoteMethodDescriptor(prototype);
 	const marker = Object.freeze({
 		method,
 		...exportName === void 0 || exportName === method ? {} : { exportName },
 		...mode === void 0 ? {} : { mode },
-		invocation: Object.freeze(invocation)
+		invocation: Object.freeze(invocation),
+		...resources === void 0 ? {} : { resources }
 	});
 	const current = descriptor?.methods.find((candidate) => candidate.method === method);
 	if (current !== void 0) {
-		if (current.exportName === marker.exportName && current.mode === marker.mode && sameInvocation(current.invocation, invocation)) return;
+		if (current.exportName === marker.exportName && current.mode === marker.mode && current.resources === marker.resources && sameInvocation(current.invocation, invocation)) return;
 		throw new Error(`typert-protocol: Remote method "${method}" has conflicting invocation markers`);
 	}
 	Object.defineProperty(prototype, REMOTE_METHOD_DESCRIPTOR, {
@@ -168,734 +191,6 @@ function sameInvocation(left, right) {
 }
 function validateName(subject, value) {
 	if (!isTypertRemoteSegment(value)) throw new TypeError(`typert-protocol: ${subject} must contain only RPC endpoint segment characters`);
-}
-//#endregion
-//#region ../node_modules/@deepseek-ai/cosmokit/lib/index.js
-/** Return true when a value is `null` or `undefined`. */
-function isNullable(value) {
-	return value === null || value === void 0;
-}
-/** Return true when a value is neither `null` nor `undefined`. */
-function isNonNullable(value) {
-	return !isNullable(value);
-}
-/** Map object values while preserving the original key set. */
-function mapValues(object, transform) {
-	return Object.fromEntries(Object.entries(object).map(([key, value]) => [key, transform(value, key)]));
-}
-/** Shared config references used by schema validators and plugin runtimes. */
-const write = Symbol.for("cosmokit.volatile.write");
-/**
-* Identify references across ESM/CJS copies of the shared library.
-* @param value - a parsed config value.
-* @returns whether the value implements the shared reference protocol.
-*/
-function isVolatile(value) {
-	return typeof value === "object" && value !== null && write in value;
-}
-/**
-* Collect config references without descending into their snapshots or opaque objects.
-* @internal
-* @param value - parsed config; cyclic ordinary fields are visited once per path.
-* @returns references and their object-key paths, including an empty path for a root reference.
-*/
-function volatileEntries(value) {
-	const ancestors = /* @__PURE__ */ new Set();
-	function visit(value, path) {
-		if (isVolatile(value)) return [{
-			path,
-			ref: value
-		}];
-		if (!value || typeof value !== "object" || ancestors.has(value)) return [];
-		if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return [];
-		ancestors.add(value);
-		try {
-			return Object.entries(value).flatMap(([key, child]) => visit(child, [...path, key]));
-		} finally {
-			ancestors.delete(value);
-		}
-	}
-	return visit(value, []);
-}
-/**
-* Commit an already validated immutable snapshot from another reference.
-* @internal
-* @param target - the owning plugin's stable reference.
-* @param source - a newly parsed candidate reference.
-*/
-function updateVolatile(target, source) {
-	target[write](source.get());
-}
-/** Test values using `instanceof` with a `toStringTag` fallback. */
-function is(type, value) {
-	if (arguments.length === 1) return (value) => is(type, value);
-	return type in globalThis && value instanceof globalThis[type] || Object.prototype.toString.call(value).slice(8, -1) === type;
-}
-function isArrayBufferLike(value) {
-	return is("ArrayBuffer", value) || is("SharedArrayBuffer", value);
-}
-function isArrayBufferSource(value) {
-	return isArrayBufferLike(value) || ArrayBuffer.isView(value);
-}
-/** Binary source detection and base64/hex conversion helpers. */
-var Binary;
-(function(Binary) {
-	Binary.is = isArrayBufferLike;
-	Binary.isSource = isArrayBufferSource;
-	function fromSource(source) {
-		if (ArrayBuffer.isView(source)) return source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength);
-		else return source;
-	}
-	Binary.fromSource = fromSource;
-	function toBase64(source) {
-		source = fromSource(source);
-		if (typeof Buffer !== "undefined") return Buffer.from(source).toString("base64");
-		let binary = "";
-		const bytes = new Uint8Array(source);
-		for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-		return btoa(binary);
-	}
-	Binary.toBase64 = toBase64;
-	function fromBase64(source) {
-		if (typeof Buffer !== "undefined") return fromSource(Buffer.from(source, "base64"));
-		return Uint8Array.from(atob(source), (c) => c.charCodeAt(0));
-	}
-	Binary.fromBase64 = fromBase64;
-	function toHex(source) {
-		source = fromSource(source);
-		if (typeof Buffer !== "undefined") return Buffer.from(source).toString("hex");
-		return Array.from(new Uint8Array(source), (byte) => byte.toString(16).padStart(2, "0")).join("");
-	}
-	Binary.toHex = toHex;
-	function fromHex(source) {
-		if (typeof Buffer !== "undefined") return fromSource(Buffer.from(source, "hex"));
-		const hex = source.length % 2 === 0 ? source : source.slice(0, source.length - 1);
-		const buffer = [];
-		for (let i = 0; i < hex.length; i += 2) buffer.push(parseInt(`${hex[i]}${hex[i + 1]}`, 16));
-		return Uint8Array.from(buffer).buffer;
-	}
-	Binary.fromHex = fromHex;
-})(Binary || (Binary = {}));
-Binary.fromBase64;
-Binary.toBase64;
-Binary.fromHex;
-Binary.toHex;
-/**
-* Compare values recursively, treating two volatile references as equal regardless of value.
-* Strict comparison distinguishes null/undefined, treats opaque objects by identity,
-* compares URLs by normalized href, treats array holes as undefined, and considers distinct cyclic structures unequal.
-* @param a - first value.
-* @param b - second value.
-* @param strict - whether to require strict data equality outside volatile references.
-* @returns whether the values compare equal.
-*/
-function deepEqual(a, b, strict) {
-	const ancestors = /* @__PURE__ */ new Set();
-	function compare(a, b) {
-		if (a === b) return true;
-		if (isVolatile(a) || isVolatile(b)) return isVolatile(a) && isVolatile(b);
-		if (!strict && isNullable(a) && isNullable(b)) return true;
-		if (typeof a !== typeof b || typeof a !== "object" || !a || !b) return false;
-		if (ancestors.has(a)) return false;
-		function check(test, then) {
-			return test(a) ? test(b) ? then(a, b) : false : test(b) ? false : void 0;
-		}
-		ancestors.add(a);
-		try {
-			return check(Array.isArray, (a, b) => {
-				if (a.length !== b.length) return false;
-				for (let index = 0; index < a.length; index++) if (!compare(a[index], b[index])) return false;
-				return true;
-			}) ?? check(is("Date"), (a, b) => a.valueOf() === b.valueOf()) ?? check(is("URL"), (a, b) => a.href === b.href) ?? check(is("RegExp"), (a, b) => a.source === b.source && a.flags === b.flags) ?? check(isArrayBufferLike, (a, b) => {
-				if (a.byteLength !== b.byteLength) return false;
-				const viewA = new Uint8Array(a);
-				const viewB = new Uint8Array(b);
-				for (let i = 0; i < viewA.length; i++) if (viewA[i] !== viewB[i]) return false;
-				return true;
-			}) ?? ((!strict || [a, b].every((value) => Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)) && Object.keys({
-				...a,
-				...b
-			}).every((key) => compare(a[key], b[key])));
-		} finally {
-			ancestors.delete(a);
-		}
-	}
-	return compare(a, b);
-}
-/** Time constants plus parsing and formatting helpers. */
-var Time;
-(function(Time) {
-	Time.millisecond = 1;
-	Time.second = 1e3;
-	Time.minute = Time.second * 60;
-	Time.hour = Time.minute * 60;
-	Time.day = Time.hour * 24;
-	Time.week = Time.day * 7;
-	let timezoneOffset = (/* @__PURE__ */ new Date()).getTimezoneOffset();
-	function setTimezoneOffset(offset) {
-		timezoneOffset = offset;
-	}
-	Time.setTimezoneOffset = setTimezoneOffset;
-	function getTimezoneOffset() {
-		return timezoneOffset;
-	}
-	Time.getTimezoneOffset = getTimezoneOffset;
-	function getDateNumber(date = /* @__PURE__ */ new Date(), offset) {
-		if (typeof date === "number") date = new Date(date);
-		if (offset === void 0) offset = timezoneOffset;
-		return Math.floor((date.valueOf() / Time.minute - offset) / 1440);
-	}
-	Time.getDateNumber = getDateNumber;
-	function fromDateNumber(value, offset) {
-		const date = new Date(value * Time.day);
-		if (offset === void 0) offset = timezoneOffset;
-		return new Date(+date + offset * Time.minute);
-	}
-	Time.fromDateNumber = fromDateNumber;
-	const numeric = /\d+(?:\.\d+)?/.source;
-	const timeRegExp = new RegExp(`^${[
-		"w(?:eek(?:s)?)?",
-		"d(?:ay(?:s)?)?",
-		"h(?:our(?:s)?)?",
-		"m(?:in(?:ute)?(?:s)?)?",
-		"s(?:ec(?:ond)?(?:s)?)?"
-	].map((unit) => `(${numeric}${unit})?`).join("")}$`);
-	function parseTime(source) {
-		const capture = timeRegExp.exec(source);
-		if (!capture) return 0;
-		return (parseFloat(capture[1]) * Time.week || 0) + (parseFloat(capture[2]) * Time.day || 0) + (parseFloat(capture[3]) * Time.hour || 0) + (parseFloat(capture[4]) * Time.minute || 0) + (parseFloat(capture[5]) * Time.second || 0);
-	}
-	Time.parseTime = parseTime;
-	function parseDate(date) {
-		const parsed = parseTime(date);
-		if (parsed) date = Date.now() + parsed;
-		else if (/^\d{1,2}(:\d{1,2}){1,2}$/.test(date)) date = `${(/* @__PURE__ */ new Date()).toLocaleDateString()}-${date}`;
-		else if (/^\d{1,2}-\d{1,2}-\d{1,2}(:\d{1,2}){1,2}$/.test(date)) date = `${(/* @__PURE__ */ new Date()).getFullYear()}-${date}`;
-		return date ? new Date(date) : /* @__PURE__ */ new Date();
-	}
-	Time.parseDate = parseDate;
-	function format(ms) {
-		const abs = Math.abs(ms);
-		if (abs >= Time.day - Time.hour / 2) return Math.round(ms / Time.day) + "d";
-		else if (abs >= Time.hour - Time.minute / 2) return Math.round(ms / Time.hour) + "h";
-		else if (abs >= Time.minute - Time.second / 2) return Math.round(ms / Time.minute) + "m";
-		else if (abs >= Time.second) return Math.round(ms / Time.second) + "s";
-		return ms + "ms";
-	}
-	Time.format = format;
-	function toDigits(source, length = 2) {
-		return source.toString().padStart(length, "0");
-	}
-	Time.toDigits = toDigits;
-	function template(template, time = /* @__PURE__ */ new Date()) {
-		return template.replace("yyyy", time.getFullYear().toString()).replace("yy", time.getFullYear().toString().slice(2)).replace("MM", toDigits(time.getMonth() + 1)).replace("dd", toDigits(time.getDate())).replace("hh", toDigits(time.getHours())).replace("mm", toDigits(time.getMinutes())).replace("ss", toDigits(time.getSeconds())).replace("SSS", toDigits(time.getMilliseconds(), 3));
-	}
-	Time.template = template;
-})(Time || (Time = {}));
-//#endregion
-//#region ../node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js
-/** Helpers for locating the current Node internal module loader. */
-var ModuleLoader;
-(function(ModuleLoader) {
-	let _cachedLoader;
-	function requireInternal(id) {
-		const require = createRequire(import.meta.url);
-		if (process.execArgv.includes("--expose-internals")) try {
-			return require(id);
-		} catch {}
-		try {
-			return require("node-addon-require-builtin").requireBuiltin(id);
-		} catch {}
-	}
-	/**
-	* Locate and classify the running Node internal module loader.
-	*
-	* The shape is decided by which module-job API the loader owns, never by the
-	* Node version: v2 landed in 24.12.0, so a major-version test mistags every
-	* 24.0–24.11.1 loader as v2 and makes consumers call `resolveSync` with
-	* reversed parameters. Arity is not usable either — `resolveSync` reports 2
-	* under both shapes. A loader owning neither API is left unclassified rather
-	* than guessed, so consumers take their documented no-internals path.
-	* @returns the classified loader, or `undefined` when none is reachable or its shape is unknown.
-	*/
-	function fromInternal() {
-		if (_cachedLoader) return _cachedLoader;
-		const [major] = process.versions.node.split(".").map(Number);
-		if (major < 22) return;
-		const raw = requireInternal("internal/modules/esm/loader")?.getOrInitializeCascadedLoader();
-		if (!raw) return;
-		const version = typeof raw.getOrCreateModuleJob === "function" ? "v2" : typeof raw.getModuleJobForImport === "function" ? "v1" : void 0;
-		if (!version) return;
-		return _cachedLoader = Object.assign(raw, { version });
-	}
-	ModuleLoader.fromInternal = fromInternal;
-})(ModuleLoader || (ModuleLoader = {}));
-/** Runtime owner for a list of child loader entries. */
-var EntryGroup = class {
-	ctx;
-	tree;
-	static key = Symbol.for("cordis.group");
-	data = [];
-	constructor(ctx, tree) {
-		this.ctx = ctx;
-		this.tree = tree;
-		const entry = ctx.fiber.entry;
-		if (entry) entry.subgroup = this;
-	}
-	get context() {
-		return this.ctx;
-	}
-	async create(options) {
-		const id = this.tree.ensureId(options);
-		const entry = this.tree.store[id] ??= new Entry(this.ctx.loader);
-		entry.parent = this;
-		await entry.update(options, true, true);
-		return entry.id;
-	}
-	unlink(options) {
-		const config = this.data;
-		const index = config.indexOf(options);
-		if (index >= 0) config.splice(index, 1);
-	}
-	remove(id, isDispose = false) {
-		const entry = this.tree.store[id];
-		if (!entry) return;
-		entry.fiber?.dispose();
-		if (!isDispose) this.unlink(entry.options);
-		delete this.tree.store[id];
-		this.context.emit("loader/partial-dispose", entry, entry.options, false);
-	}
-	async update(config) {
-		const oldConfig = this.data;
-		this.data = config;
-		const oldMap = Object.fromEntries(oldConfig.map((options) => [options.id, options]));
-		const newMap = Object.fromEntries(config.map((options) => [options.id ?? Symbol("anonymous"), options]));
-		const ids = Reflect.ownKeys({
-			...oldMap,
-			...newMap
-		});
-		await Promise.all(ids.map(async (id) => {
-			if (newMap[id]) await this.create(newMap[id]).catch((error) => {
-				this.ctx.logger.error(error);
-			});
-			else this.remove(id);
-		}));
-	}
-	stop() {
-		for (const options of this.data) this.remove(options.id, true);
-	}
-};
-EntryGroup.key, Service.init;
-var __rewriteRelativeImportExtension$1 = function(path, preserveJsx) {
-	if (typeof path === "string" && /^\.\.?\//.test(path)) return path.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m, tsx, d, ext, cm) {
-		return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m : d + ext + "." + cm.toLowerCase() + "js";
-	});
-	return path;
-};
-/** Mutable tree of loader entries. Persistence is supplied by subclasses. */
-var EntryTree = class EntryTree {
-	static sep = ":";
-	ctx;
-	enableLogs;
-	root;
-	store = Object.create(null);
-	constructor(ctx) {
-		this.ctx = ctx.extend({ baseUrl: ctx.baseUrl });
-		this.root = new EntryGroup(this.ctx, this);
-		const entry = this.ctx.fiber.entry;
-		if (entry) entry.subtree = this;
-	}
-	get context() {
-		return this.ctx;
-	}
-	/** Iterate entries in this tree and any nested subtrees. */
-	*entries() {
-		for (const entry of Object.values(this.store)) {
-			yield entry;
-			if (!entry.subtree) continue;
-			yield* entry.subtree.entries();
-		}
-	}
-	/** Return pending import and lifecycle tasks owned by this tree. */
-	getTasks() {
-		return [...this.entries()].map((entry) => entry._initTask || entry.fiber?.inertia).filter(isNonNullable);
-	}
-	/** Wait until this tree has no pending import or lifecycle tasks. */
-	async await() {
-		while (true) {
-			const tasks = this.getTasks();
-			if (!tasks.length) return;
-			await Promise.allSettled(tasks);
-		}
-	}
-	ensureId(options) {
-		if (!options.id) do
-			options.id = Math.random().toString(16).slice(2, 10);
-		while (this.store[options.id]);
-		return options.id;
-	}
-	/** Resolve an entry by id, including nested ids separated by `EntryTree.sep`. */
-	resolve(id) {
-		const parts = id.split(EntryTree.sep);
-		let tree = this;
-		const final = parts.pop();
-		for (const part of parts) {
-			tree = tree.store[part]?.subtree;
-			if (!tree) throw new Error(`cannot resolve entry ${id}`);
-		}
-		const entry = tree.store[final];
-		if (!entry) throw new Error(`cannot resolve entry ${id}`);
-		return entry;
-	}
-	resolveGroup(id) {
-		if (!id) return this.root;
-		const entry = this.resolve(id);
-		if (!entry.subgroup) throw new Error(`entry ${id} is not a group`);
-		return entry.subgroup;
-	}
-	/** Create an entry in the root group or a nested group. */
-	async create(options, parent = null, position = Infinity) {
-		const group = this.resolveGroup(parent);
-		group.data.splice(position, 0, options);
-		group.tree.write();
-		return group.create(options);
-	}
-	/** Stop and remove an entry from its parent group. */
-	remove(id) {
-		const entry = this.resolve(id);
-		entry.parent.remove(id);
-		entry.parent.tree.write();
-	}
-	/** Update an entry and optionally move it to another group. */
-	async update(id, options, parent, position) {
-		const entry = this.resolve(id);
-		const source = entry.parent;
-		if (parent !== void 0) {
-			const target = this.resolveGroup(parent);
-			source.unlink(entry.options);
-			target.data.splice(position ?? Infinity, 0, entry.options);
-			target.tree.write();
-			entry.parent = target;
-		}
-		source.tree.write();
-		return entry.update(options, false, true);
-	}
-	/** Import a plugin module from a specifier or `cordis:` builtin. */
-	import(name, getOuterStack) {
-		if (name.startsWith("cordis:")) return this.ctx.loader.builtins[name.slice(7)];
-		return composeError(async (info) => {
-			info.offset += 3;
-			if (this.ctx.loader.internal) return await this.ctx.loader.internal.import(name, this.ctx.baseUrl, {});
-			else if (name.startsWith(".")) return await import(__rewriteRelativeImportExtension$1(
-				/* @vite-ignore */
-				new URL(name, this.ctx.baseUrl).href
-			));
-			else return await import(__rewriteRelativeImportExtension$1(
-				/* @vite-ignore */
-				name
-			));
-		}, getOuterStack);
-	}
-};
-/** Evaluate a JavaScript expression against a loader context scope. */
-const evaluate = new Function("ctx", "expr", `
-  with (ctx) {
-    return eval(expr)
-  }
-`);
-/** Recursively replace YAML `!!js` expression nodes with evaluated values. */
-function interpolate(ctx, value) {
-	if (isJsExpr(value)) return evaluate(ctx, value.__jsExpr);
-	else if (!value || typeof value !== "object") return value;
-	else if (Array.isArray(value)) return value.map((item) => interpolate(ctx, item));
-	else return mapValues(value, (item) => interpolate(ctx, item));
-}
-/** Return true when a value is a serialized loader JavaScript expression. */
-function isJsExpr(value) {
-	return value instanceof Object && "__jsExpr" in value;
-}
-function isSchemastery(schema) {
-	return schema?.["~standard"].vendor === "schemastery";
-}
-function isRecord(value) {
-	if (!value || typeof value !== "object" || isJsExpr(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-function equal(a, b, schema, ancestors) {
-	if (schema?.meta?.volatile) return true;
-	if (schema?.type !== "object" || !schema.dict || ancestors.has(schema)) return deepEqual(a, b, true);
-	const left = a ?? schema.meta?.default;
-	const right = b ?? schema.meta?.default;
-	if (!isRecord(left) || !isRecord(right)) return deepEqual(left, right, true);
-	const { dict } = schema;
-	ancestors.add(schema);
-	try {
-		return Object.keys({
-			...left,
-			...right
-		}).every((key) => equal(left[key], right[key], Object.hasOwn(dict, key) ? dict[key] : void 0, ancestors));
-	} finally {
-		ancestors.delete(schema);
-	}
-}
-/**
-* Compare two raw configs, treating schema-declared volatile fields at fixed object paths as equal and absent objects as their schema default.
-* Schema backedges, expressions, unknown fields and opaque values keep strict raw equality; an absent or non-Schemastery schema compares everything raw.
-* @param previous - previous raw config.
-* @param next - next raw config.
-* @param schema - the plugin's config schema.
-* @returns Whether the configs differ at most in volatile fields, without evaluating expressions, validating config or modifying inputs.
-* @internal
-*/
-function equalExceptVolatile(previous, next, schema) {
-	return isSchemastery(schema) ? equal(previous, next, schema, /* @__PURE__ */ new Set()) : deepEqual(previous, next, true);
-}
-function takeEntries(object, keys) {
-	const result = [];
-	for (const key of keys) {
-		if (!(key in object)) continue;
-		result.push([key, object[key]]);
-		delete object[key];
-	}
-	return result;
-}
-function sortKeys(object, prepend = ["id", "name"], append = ["config"]) {
-	const part1 = takeEntries(object, prepend);
-	const part2 = takeEntries(object, append);
-	const rest = takeEntries(object, Object.keys(object)).sort(([a], [b]) => a.localeCompare(b));
-	return Object.assign(object, Object.fromEntries([
-		...part1,
-		...rest,
-		...part2
-	]));
-}
-/** One configured plugin node inside an `EntryTree`. */
-var Entry = class Entry {
-	loader;
-	static key = Symbol.for("cordis.entry");
-	ctx;
-	fiber;
-	parent;
-	options = {};
-	subgroup;
-	subtree;
-	_initTask;
-	constructor(loader) {
-		this.loader = loader;
-		this.ctx = loader.ctx.extend({ [Entry.key]: this });
-		this.context.emit("loader/entry-init", this);
-	}
-	get context() {
-		return this.ctx;
-	}
-	get id() {
-		let id = this.options.id;
-		if (this.parent.tree.ctx.fiber.entry) id = this.parent.tree.ctx.fiber.entry.id + EntryTree.sep + id;
-		return id;
-	}
-	/** True when this entry or any owning parent entry is disabled. */
-	get disabled() {
-		if (this.options.group) return false;
-		let entry = this;
-		do {
-			if (this.disabledOf(entry.options)) return true;
-			entry = entry.parent.ctx.fiber.entry;
-		} while (entry);
-		return false;
-	}
-	/**
-	* Effective disabled state: a `!!js` expression evaluates against the loader
-	* context. The raw node stays in the options, so write-back keeps the form.
-	*/
-	disabledOf(options) {
-		return isJsExpr(options.disabled) ? Boolean(this.evaluate(options.disabled.__jsExpr)) : Boolean(options.disabled);
-	}
-	evaluate(expr) {
-		return evaluate(this.ctx, expr);
-	}
-	_patchContext(diff) {
-		this.context.waterfall("loader/patch-context", this, () => {
-			Object.setPrototypeOf(this.ctx, this.parent.ctx);
-			if (this.fiber?.uid && (diff.includes("config") || this.options.group)) this.fiber.update(this.options.config, true);
-		});
-	}
-	async refresh() {
-		if (this.fiber) return;
-		if (this.disabled) return;
-		await this.init();
-	}
-	/** Merge new options, restart as needed, and persist through the parent tree. */
-	async update(options, create = false, force = false) {
-		const legacy = { ...this.options };
-		if (create) this.options = options;
-		else for (const [key, value] of Object.entries(options)) if (isNullable(value)) delete this.options[key];
-		else this.options[key] = value;
-		sortKeys(this.options);
-		if (this.disabled) {
-			this.fiber?.dispose();
-			return;
-		}
-		if (this.fiber?.uid) {
-			const changes = Object.keys({
-				...this.options,
-				...legacy
-			}).filter((key) => !deepEqual(this.options[key], legacy[key], key === "config"));
-			const volatileOnly = changes.length === 1 && changes[0] === "config" && this.fiber.state === 2 && Object.getPrototypeOf(this.ctx) === this.parent.ctx && equalExceptVolatile(legacy.config, this.options.config, this.fiber.runtime?.Config);
-			if (volatileOnly) this.fiber._config = this.options.config;
-			const pending = volatileOnly && this._commitVolatile() ? [] : changes;
-			if (!pending.length && !force) return;
-			this.context.emit("loader/partial-dispose", this, legacy, true);
-			this._patchContext(pending);
-		} else await this.init();
-	}
-	/**
-	* Parse a volatile-only raw config change and commit its values into the running fiber's references.
-	* An invalid candidate is logged and leaves the running references unchanged; the raw config stays retained for the next activation.
-	* @returns `false` when an ordinary effective value changed, so the caller applies the ordinary update lifecycle.
-	*/
-	_commitVolatile() {
-		const fiber = this.fiber;
-		const refs = volatileEntries(fiber.config);
-		if (!refs.length) return true;
-		const raw = this.options.config;
-		let candidate;
-		try {
-			candidate = resolveConfig(fiber.runtime, fiber.ctx.waterfall(fiber, "internal/config", raw, () => raw));
-		} catch (error) {
-			this.ctx.logger.warn("volatile config update failed for %C", this.options.id);
-			this.ctx.logger.warn(error);
-			return true;
-		}
-		if (!deepEqual(fiber.config, candidate, true)) {
-			this.ctx.logger.debug("ordinary config values of %C changed with its volatile values; applying the ordinary update", this.options.id);
-			return false;
-		}
-		const paths = refs.flatMap(({ path, ref }) => {
-			const source = path.reduce((value, key) => Reflect.get(value, key), candidate);
-			if (deepEqual(ref.get(), source.get(), true)) return [];
-			updateVolatile(ref, source);
-			return [path];
-		});
-		if (!paths.length) return true;
-		const self = Object.create(fiber.ctx);
-		self[Context.filter] = (owner) => owner.fiber === fiber;
-		try {
-			fiber.ctx.emit(self, "loader/volatile-update", paths);
-		} catch (error) {
-			this.ctx.logger.warn(error);
-		}
-		return true;
-	}
-	getOuterStack = () => {
-		let entry = this;
-		const result = [];
-		do {
-			result.push(`    at ${entry.parent.tree.ctx.baseUrl}#${entry.options.id}`);
-			entry = entry.parent.ctx.fiber.entry;
-		} while (entry);
-		return result;
-	};
-	/** Import and start the configured plugin if it is not already running. */
-	async init() {
-		try {
-			await (this._initTask ??= this._init());
-		} finally {
-			this._initTask = void 0;
-		}
-		const notify = () => {
-			if (this.loader.getTasks().length) return;
-			this.ctx.reflect.notify(["loader"]);
-		};
-		this.fiber?.await().then(notify, notify);
-	}
-	async _init() {
-		let exports;
-		try {
-			exports = await this.parent.tree.import(this.options.name, this.getOuterStack);
-		} catch (error) {
-			this.ctx.logger.error(error);
-			return;
-		} finally {
-			this._initTask = void 0;
-		}
-		const plugin = this.loader.unwrapExports(exports);
-		this._patchContext([]);
-		this.loader.showLog(this, "apply");
-		this.fiber = this.ctx.registry.plugin(plugin, this.options.config, this.getOuterStack).ctx.fiber;
-	}
-};
-Service.check;
-const JsExpr = new yaml.Type("tag:yaml.org,2002:js", {
-	kind: "scalar",
-	resolve: (data) => typeof data === "string",
-	construct: (data) => ({ __jsExpr: data }),
-	predicate: isJsExpr,
-	represent: (data) => data["__jsExpr"]
-});
-/**
-* The entry-list YAML dialect: `!!js` scalars round-trip as expression nodes
-* the Loader evaluates at entry activation. Exported so config tooling
-* (`dsh --dump-config`) parses and prints exactly the dialect this include
-* mounts.
-*/
-const entryListSchema = yaml.JSON_SCHEMA.extend(JsExpr);
-new Set(Object.keys({
-	".json": "application/json",
-	".yaml": "application/yaml",
-	".yml": "application/yaml"
-}));
-EntryGroup.key, Service.init;
-//#endregion
-//#region ../node_modules/@deepseek-ai/dsh-home-paths/lib/index.js
-/**
-* Shared filesystem path helpers for DeepSeek Harness user data.
-*
-* @module @deepseek-ai/dsh-home-paths
-*/
-/** Directory name for the default DeepSeek Harness home under the OS home. */
-const DSH_HOME_DIR_NAME = ".dsh";
-/** Environment variable that overrides the default DeepSeek Harness home. */
-const DSH_HOME_ENV = "DSH_HOME";
-/**
-* Resolve the default DeepSeek Harness home using Node's platform path rules.
-* @returns the absolute default harness home path.
-*/
-function defaultDshHome() {
-	return join(homedir(), DSH_HOME_DIR_NAME);
-}
-/**
-* Expand supported tilde prefixes against the operating-system home.
-* @param path - configured path that may begin with `~`, `~/`, or `~\`.
-* @returns the expanded path, or the original value when no supported prefix is present.
-*/
-function expandHomePath(path) {
-	if (path === "~") return homedir();
-	if (path.startsWith("~/") || path.startsWith("~\\")) return join(homedir(), path.slice(2));
-	return path;
-}
-/**
-* Resolve the single-root DeepSeek Harness home.
-*
-* Precedence, highest first: an explicit configured path, `$DSH_HOME`, then
-* `~/.dsh`. The harness keeps all user data under one root. An empty or
-* whitespace-only `$DSH_HOME` is treated as unset, so a blank override never
-* resolves the home to the current working directory.
-* @param configured - explicit harness-home override, which has highest precedence.
-* @param env - environment mapping used to read `DSH_HOME`.
-* @returns the normalized absolute harness home path.
-*/
-function resolveDshHome(configured, env = process.env) {
-	const fromEnv = env[DSH_HOME_ENV];
-	return resolve(expandHomePath(configured ?? (fromEnv !== void 0 && fromEnv.trim().length > 0 ? fromEnv : defaultDshHome())));
-}
-/**
-* Join path segments onto the resolved DeepSeek Harness home.
-* @param segments - path segments appended to the Harness home; an empty list returns the home itself.
-* @returns the normalized absolute joined path.
-*/
-function dshHomePath(...segments) {
-	return join(resolveDshHome(), ...segments);
 }
 //#endregion
 //#region ../node_modules/@deepseek-ai/dsh-brand/lib/index.js
@@ -922,6 +217,628 @@ function brandString(value) {
 }
 //#endregion
 //#region ../node_modules/@deepseek-ai/dsh-util-values/lib/index.js
+/**
+* Lazily scanned view of one JSON object's top-level fields, built from text
+* that may still be streaming or from an already parsed object. Nothing is
+* scanned until a reader asks; the view remembers every question it answered
+* and reports changed answers when the owner refreshes for publication.
+* Used for model tool-call arguments: a row reads the fields it
+* cares about at whatever granularity it displays, at every stage of the call.
+* @module @deepseek-ai/dsh-util-values/src/partial-json
+*/
+const SIMPLE_ESCAPES = {
+	"\"": "\"",
+	"\\": "\\",
+	"/": "/",
+	b: "\b",
+	f: "\f",
+	n: "\n",
+	r: "\r",
+	t: "	"
+};
+const CONTENT_ESCAPE = /[\\\u0000-\u001f]/u;
+function isWhitespace(c) {
+	return c === " " || c === "\n" || c === "\r" || c === "	";
+}
+function isHex(c) {
+	return c >= "0" && c <= "9" || c >= "a" && c <= "f" || c >= "A" && c <= "F";
+}
+(class PartialArguments {
+	/** The view of a call with no arguments available. */
+	static EMPTY = PartialArguments.fromObject({});
+	/**
+	* View finished argument text without scanning it until a reader asks.
+	* @param text - the complete argument JSON text.
+	* @returns a sealed view.
+	*/
+	static fromText(text) {
+		const view = new PartialArguments();
+		view.append(text);
+		view.sealed = true;
+		return view;
+	}
+	/**
+	* View an already parsed argument payload, such as a PTC dispatch object.
+	* @param value - the parsed argument value.
+	* @returns a sealed view; a non-object payload has no fields.
+	*/
+	static fromObject(value) {
+		const view = new PartialArguments();
+		view.object = typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+		view.sealed = true;
+		return view;
+	}
+	/**
+	* The source: text so far or a parsed object, plus whether it can still grow.
+	* These are the only enumerable fields, so two views over the same source
+	* compare equal structurally however far each has been read.
+	*/
+	chunks = [];
+	object;
+	sealed = false;
+	#ends = [];
+	#size = 0;
+	#consumed = 0;
+	#mode = "root";
+	#escape = false;
+	#keyStart = 0;
+	#keyEscaped = false;
+	#key = "";
+	#current = null;
+	#nestedEnds = [];
+	#nestedInString = false;
+	#invalidAt;
+	#invalidValue = false;
+	#entries = /* @__PURE__ */ new Map();
+	#order = [];
+	#reads = /* @__PURE__ */ new Map();
+	/** Whether this view rejects further appends; does not scan text or register reads. */
+	get isSealed() {
+		return this.sealed;
+	}
+	/** Whether indexing or a content read found invalid JSON; unread value contents are not validated. */
+	get invalid() {
+		this.scan();
+		return this.#mode === "invalid" || this.#invalidValue;
+	}
+	/**
+	* Retain streamed argument text without scanning or comparing observed answers.
+	* @param fragment - the text following every fragment appended before.
+	*/
+	append(fragment) {
+		if (this.sealed) throw new Error("PartialArguments: cannot append to a sealed view");
+		if (fragment.length === 0) return;
+		this.chunks.push(fragment);
+		this.#size += fragment.length;
+		this.#ends.push(this.#size);
+	}
+	/**
+	* Reconcile a streamed prefix with authoritative complete text without joining the fragments.
+	* @param text - the final argument text, which replaces missing or conflicting deltas.
+	* @returns this view sealed with its caches retained when every character matches; otherwise a new sealed view.
+	*/
+	settle(text) {
+		if (this.object !== void 0 || text.length !== this.#size) return PartialArguments.fromText(text);
+		let offset = 0;
+		for (const chunk of this.chunks) {
+			if (!text.startsWith(chunk, offset)) return PartialArguments.fromText(text);
+			offset += chunk.length;
+		}
+		this.chunks = text.length === 0 ? [] : [text];
+		this.#ends = text.length === 0 ? [] : [text.length];
+		this.sealed = true;
+		return this;
+	}
+	/**
+	* Compare observed answers and advance their publication baseline. Unread views remain unscanned.
+	* @returns whether any observed answer changed since its first read or the preceding refresh.
+	*/
+	refresh() {
+		if (this.#reads.size === 0) return false;
+		this.scan();
+		let changed = false;
+		let completions = false;
+		for (const read of this.#reads.values()) {
+			if (read.completion) {
+				completions = true;
+				continue;
+			}
+			changed = this.refreshRead(read) || changed;
+		}
+		if (completions) {
+			for (const read of this.#reads.values()) if (read.completion) changed = this.refreshRead(read) || changed;
+		}
+		if (this.sealed) this.#reads.clear();
+		return changed;
+	}
+	refreshRead(read) {
+		const now = read.answer();
+		if (Object.is(now, read.last)) return false;
+		read.last = now;
+		return true;
+	}
+	/**
+	* Check whether no further fields can arrive.
+	* @returns whether the outer object closed, indexing failed, or the view is sealed; unread values are not validated.
+	*/
+	closed() {
+		return this.remember("closed", "", () => this.closedNow());
+	}
+	/**
+	* List discovered fields in first-appearance order.
+	* @returns top-level keys seen so far, in first-appearance order.
+	*/
+	keys() {
+		return this.remember("keys", "", () => this.keysNow(), (keys) => keys.length);
+	}
+	/**
+	* Check whether a top-level field has appeared.
+	* @param key - argument name.
+	* @returns whether the field has appeared (a string opened or another value began).
+	*/
+	has(key) {
+		return this.remember("has", key, () => this.hasNow(key));
+	}
+	/**
+	* Check whether a field's closing delimiter has arrived, without validating its contents.
+	* @param key - argument name.
+	* @returns whether its delimiter arrived and no content reader has reported an error for this value.
+	*/
+	complete(key) {
+		return this.remember("complete", key, () => this.completeNow(key));
+	}
+	/**
+	* Read string length without materializing its text.
+	* @param key - argument name.
+	* @param options - change granularity for a streaming string.
+	* @returns decoded UTF-16 length of the string field so far; undefined when absent or not a string.
+	*/
+	stringLength(key, options) {
+		const step = Math.max(1, Math.floor(options?.step ?? 1));
+		const offset = options?.offset ?? 0;
+		return this.remember(`length:${step}:${offset}`, key, () => this.lengthNow(key), (length) => length === void 0 ? void 0 : Math.ceil((length + offset) / step));
+	}
+	/**
+	* Check a string against a decoded UTF-16 length limit without materializing it.
+	* @param key - argument name.
+	* @param maxLength - decoded UTF-16 limit, floored to at least zero.
+	* @returns whether the string is longer than the limit; false when absent or not a string.
+	*/
+	stringExceeds(key, maxLength) {
+		const limit = Math.max(0, Math.floor(maxLength));
+		return this.remember(`exceeds:${limit}`, key, () => (this.lengthNow(key, limit + 1) ?? 0) > limit);
+	}
+	/**
+	* Read a decoded string, including a streaming prefix.
+	* @param key - argument name.
+	* @returns the string field's decoded text so far; undefined when absent or not a string.
+	*/
+	text(key) {
+		return this.remember("text", key, () => this.textNow(key));
+	}
+	/**
+	* Read at most the first decoded UTF-16 units of a string.
+	* @param key - argument name.
+	* @param maxLength - maximum decoded UTF-16 length, floored to at least one.
+	* @returns the bounded string prefix; undefined when absent or not a string.
+	*/
+	textPrefix(key, maxLength) {
+		const limit = Math.max(1, Math.floor(maxLength));
+		return this.remember(`prefix:${limit}`, key, () => this.textPrefixNow(key, limit));
+	}
+	/**
+	* Read a completed non-string argument.
+	* @param key - argument name.
+	* @returns the parsed non-string value once it closed; undefined while open, absent, or a string.
+	*/
+	value(key) {
+		return this.remember("value", key, () => this.valueNow(key));
+	}
+	/** Answer a question and, on a streaming view, remember it for change detection. */
+	remember(kind, key, read, comparison) {
+		this.scan();
+		const result = read();
+		if (!this.sealed) {
+			const id = `${kind}/${key}`;
+			if (!this.#reads.has(id)) this.#reads.set(id, {
+				completion: kind === "complete",
+				answer: comparison === void 0 ? read : () => comparison(read()),
+				last: comparison === void 0 ? result : comparison(result)
+			});
+		}
+		return result;
+	}
+	closedNow() {
+		return this.sealed || this.#mode === "closed" || this.#mode === "invalid";
+	}
+	keysNow() {
+		return this.object === void 0 ? this.#order : Object.keys(this.object);
+	}
+	hasNow(key) {
+		return this.object === void 0 ? this.#entries.has(key) : Object.hasOwn(this.object, key);
+	}
+	completeNow(key) {
+		if (this.object !== void 0) return Object.hasOwn(this.object, key);
+		const entry = this.#entries.get(key);
+		return entry !== void 0 && entry.end >= 0 && (entry.kind === "string" ? entry.invalidAt === void 0 : !entry.invalid);
+	}
+	lengthNow(key, limit = Number.POSITIVE_INFINITY) {
+		if (this.object !== void 0) {
+			const field = Object.hasOwn(this.object, key) ? this.object[key] : void 0;
+			return typeof field === "string" ? field.length : void 0;
+		}
+		const entry = this.#entries.get(key);
+		if (entry?.kind !== "string") return void 0;
+		if (entry.text !== void 0 && entry.text.at === entry.end) return entry.text.length;
+		const read = entry.length ??= {
+			at: entry.start,
+			length: 0,
+			text: ""
+		};
+		this.readString(entry, read, limit, false);
+		return read.length;
+	}
+	textNow(key) {
+		if (this.object !== void 0) {
+			const field = Object.hasOwn(this.object, key) ? this.object[key] : void 0;
+			return typeof field === "string" ? field : void 0;
+		}
+		const entry = this.#entries.get(key);
+		if (entry?.kind !== "string") return void 0;
+		if (entry.text === void 0 && entry.end >= 0 && entry.needsDecoding && entry.invalidAt === void 0) {
+			let text;
+			try {
+				text = JSON.parse(`"${this.slice(entry.start, entry.end)}"`);
+			} catch (_error) {}
+			if (text !== void 0) entry.text = {
+				at: entry.end,
+				length: text.length,
+				text
+			};
+		}
+		const read = entry.text ??= {
+			at: entry.start,
+			length: 0,
+			text: ""
+		};
+		this.readString(entry, read, Number.POSITIVE_INFINITY, true);
+		return read.text;
+	}
+	textPrefixNow(key, maxLength) {
+		if (this.object !== void 0) {
+			const field = Object.hasOwn(this.object, key) ? this.object[key] : void 0;
+			return typeof field === "string" ? field.slice(0, maxLength) : void 0;
+		}
+		const entry = this.#entries.get(key);
+		if (entry?.kind !== "string") return void 0;
+		const prefixes = entry.prefixes ??= /* @__PURE__ */ new Map();
+		let read = prefixes.get(maxLength);
+		if (read === void 0) {
+			read = {
+				at: entry.start,
+				length: 0,
+				text: ""
+			};
+			prefixes.set(maxLength, read);
+		}
+		this.readString(entry, read, maxLength, true);
+		return read.text;
+	}
+	valueNow(key) {
+		if (this.object !== void 0) {
+			if (!Object.hasOwn(this.object, key)) return void 0;
+			const field = this.object[key];
+			return typeof field === "string" ? void 0 : field;
+		}
+		const entry = this.#entries.get(key);
+		if (entry?.kind !== "value" || entry.end < 0 || entry.invalid) return void 0;
+		if (entry.parsed === void 0) try {
+			entry.parsed = JSON.parse(this.slice(entry.start, entry.end));
+		} catch (_error) {
+			entry.invalid = true;
+			this.#invalidValue = true;
+		}
+		return entry.parsed;
+	}
+	chunkAt(at) {
+		let low = 0;
+		let high = this.#ends.length;
+		while (low < high) {
+			const mid = low + high >>> 1;
+			if (this.#ends[mid] <= at) low = mid + 1;
+			else high = mid;
+		}
+		return low;
+	}
+	/** Materialize only a requested range, never the cumulative source. */
+	slice(start, end) {
+		if (start >= end) return "";
+		const first = this.chunkAt(start);
+		const last = this.chunkAt(end - 1);
+		const base = first === 0 ? 0 : this.#ends[first - 1];
+		if (first === last) return this.chunks[first].slice(start - base, end - base);
+		const parts = [this.chunks[first].slice(start - base)];
+		for (let i = first + 1; i < last; i++) parts.push(this.chunks[i]);
+		parts.push(this.chunks[last].slice(0, end - this.#ends[last - 1]));
+		return parts.join("");
+	}
+	readString(entry, read, limit, materialize) {
+		const end = Math.min(entry.end < 0 ? this.#consumed : entry.end, entry.invalidAt ?? Number.POSITIVE_INFINITY, this.#invalidAt ?? Number.POSITIVE_INFINITY);
+		if (!entry.needsDecoding) {
+			const length = Math.min(end - read.at, limit - read.length);
+			if (length <= 0) return;
+			if (materialize) read.text += this.slice(read.at, read.at + length);
+			read.at += length;
+			read.length += length;
+			return;
+		}
+		let chunkIndex = this.chunkAt(read.at);
+		while (read.at < end && read.length < limit) {
+			const base = chunkIndex === 0 ? 0 : this.#ends[chunkIndex - 1];
+			const chunk = this.chunks[chunkIndex];
+			const remaining = chunk.slice(read.at - base, Math.min(chunk.length, end - base));
+			const boundary = remaining.search(CONTENT_ESCAPE);
+			const length = Math.min(boundary < 0 ? remaining.length : boundary, limit - read.length);
+			if (length > 0) {
+				if (materialize) read.text += remaining.slice(0, length);
+				read.at += length;
+				read.length += length;
+				if (read.at === base + chunk.length) chunkIndex++;
+				continue;
+			}
+			const type = remaining.length > 1 ? remaining[1] : read.at + 1 < end ? this.chunks[chunkIndex + 1][0] : void 0;
+			let decoded;
+			let width = 2;
+			if (remaining[0] === "\\" && type === void 0 && entry.end < 0) return;
+			if (remaining[0] === "\\" && type === "u") {
+				const hex = this.slice(read.at + 2, Math.min(end, read.at + 6));
+				let valid = true;
+				for (let i = 0; i < hex.length; i++) if (!isHex(hex[i])) valid = false;
+				if (valid) {
+					if (hex.length < 4 && entry.end < 0) return;
+					if (hex.length === 4) decoded = String.fromCharCode(Number.parseInt(hex, 16));
+				}
+				width = 6;
+			} else if (remaining[0] === "\\" && type !== void 0) decoded = SIMPLE_ESCAPES[type];
+			if (decoded === void 0) {
+				entry.invalidAt = read.at;
+				this.#invalidValue = true;
+				return;
+			}
+			if (materialize) read.text += decoded;
+			read.length++;
+			read.at += width;
+			while (chunkIndex < this.chunks.length && read.at >= this.#ends[chunkIndex]) chunkIndex++;
+		}
+	}
+	/** Locate new field ranges without decoding or parsing their contents. */
+	scan() {
+		if (this.object !== void 0 || this.#consumed === this.#size) return;
+		for (let i = this.chunkAt(this.#consumed); i < this.chunks.length && this.#invalidAt === void 0; i++) {
+			const pending = this.chunks[i];
+			const base = i === 0 ? 0 : this.#ends[i - 1];
+			for (let index = this.#consumed - base; index < pending.length && this.#mode !== "invalid"; index++) {
+				if (this.#mode === "string" || this.#mode === "nested" && this.#nestedInString) {
+					const end = this.stringBoundary(pending, index);
+					this.#consumed += end - index;
+					index = end;
+					if (index === pending.length) break;
+				}
+				this.step(pending[index], this.#consumed);
+				this.#consumed++;
+			}
+		}
+	}
+	/** Only raw quotes and their preceding backslash runs can terminate a string. */
+	stringBoundary(fragment, start) {
+		let at = start;
+		while (true) {
+			const quote = fragment.indexOf("\"", at);
+			const end = quote < 0 ? fragment.length : quote;
+			if (this.#mode === "string") {
+				const entry = this.#current;
+				if (!entry.needsDecoding && CONTENT_ESCAPE.test(fragment.slice(at, end))) entry.needsDecoding = true;
+			}
+			let slashStart = end;
+			while (slashStart > at && fragment[slashStart - 1] === "\\") slashStart--;
+			const escaped = (end - slashStart) % 2 === 1 !== (slashStart === at && this.#escape);
+			this.#escape = quote < 0 && escaped;
+			if (quote < 0 || !escaped) return end;
+			at = quote + 1;
+		}
+	}
+	step(c, at) {
+		switch (this.#mode) {
+			case "root":
+				if (isWhitespace(c)) return;
+				if (c === "{") {
+					this.#mode = "key-or-end";
+					return;
+				}
+				this.fail();
+				return;
+			case "key-or-end":
+				if (isWhitespace(c)) return;
+				if (c === "}") {
+					this.#mode = "closed";
+					return;
+				}
+				if (c === "\"") {
+					this.beginKey(at);
+					return;
+				}
+				this.fail();
+				return;
+			case "key-only":
+				if (isWhitespace(c)) return;
+				if (c === "\"") {
+					this.beginKey(at);
+					return;
+				}
+				this.fail();
+				return;
+			case "key":
+				this.stepKey(c, at);
+				return;
+			case "colon":
+				if (isWhitespace(c)) return;
+				if (c === ":") {
+					this.#mode = "value";
+					return;
+				}
+				this.fail();
+				return;
+			case "value":
+				this.beginValue(c, at);
+				return;
+			case "string": {
+				const entry = this.#current;
+				entry.end = at;
+				this.#current = null;
+				this.#mode = "comma-or-end";
+				return;
+			}
+			case "scalar":
+				this.stepScalar(c, at);
+				return;
+			case "nested":
+				this.stepNested(c, at);
+				return;
+			case "comma-or-end":
+				if (isWhitespace(c)) return;
+				if (c === ",") {
+					this.#mode = "key-only";
+					return;
+				}
+				if (c === "}") {
+					this.#mode = "closed";
+					return;
+				}
+				this.fail();
+				return;
+			case "closed":
+				if (isWhitespace(c)) return;
+				this.fail();
+				return;
+			/* v8 ignore next 2 -- scan() stops stepping once the view is invalid. */
+			case "invalid": return;
+			/* v8 ignore next 2 -- Every scanner mode has a handler above. */
+			default: assertNever(this.#mode);
+		}
+	}
+	fail() {
+		this.#invalidAt = this.#consumed;
+		this.#mode = "invalid";
+		this.#current = null;
+	}
+	beginKey(at) {
+		this.#mode = "key";
+		this.#keyStart = at + 1;
+		this.#keyEscaped = false;
+		this.#escape = false;
+	}
+	stepKey(c, at) {
+		if (c < " ") {
+			this.fail();
+			return;
+		}
+		if (this.#escape) {
+			this.#escape = false;
+			return;
+		}
+		if (c === "\\") {
+			this.#escape = true;
+			this.#keyEscaped = true;
+			return;
+		}
+		if (c !== "\"") return;
+		const raw = this.slice(this.#keyStart, at);
+		if (this.#keyEscaped) try {
+			this.#key = JSON.parse(`"${raw}"`);
+		} catch (_error) {
+			this.fail();
+			return;
+		}
+		else this.#key = raw;
+		this.#mode = "colon";
+	}
+	open(entry) {
+		if (!this.#entries.has(this.#key)) this.#order.push(this.#key);
+		this.#entries.set(this.#key, entry);
+		this.#current = entry;
+	}
+	beginValue(c, at) {
+		if (isWhitespace(c)) return;
+		if (c === "\"") {
+			this.open({
+				kind: "string",
+				start: at + 1,
+				end: -1,
+				needsDecoding: false,
+				invalidAt: void 0,
+				length: void 0,
+				text: void 0,
+				prefixes: void 0
+			});
+			this.#escape = false;
+			this.#mode = "string";
+			return;
+		}
+		if (c === "}" || c === "," || c === ":" || c === "]") {
+			this.fail();
+			return;
+		}
+		this.open({
+			kind: "value",
+			start: at,
+			end: -1,
+			parsed: void 0,
+			invalid: false
+		});
+		if (c === "{" || c === "[") {
+			this.#mode = "nested";
+			this.#nestedEnds = [c === "{" ? "}" : "]"];
+			this.#nestedInString = false;
+			this.#escape = false;
+			return;
+		}
+		this.#mode = "scalar";
+	}
+	stepScalar(c, at) {
+		if (c !== "," && c !== "}" && !isWhitespace(c)) return;
+		this.closeValue(at);
+		this.#mode = c === "," ? "key-only" : c === "}" ? "closed" : "comma-or-end";
+	}
+	stepNested(c, at) {
+		if (this.#nestedInString) {
+			this.#nestedInString = false;
+			return;
+		}
+		if (c === "\"") {
+			this.#nestedInString = true;
+			return;
+		}
+		if (c === "{" || c === "[") {
+			this.#nestedEnds.push(c === "{" ? "}" : "]");
+			return;
+		}
+		if (c === "}" || c === "]") {
+			if (this.#nestedEnds.pop() !== c) {
+				this.fail();
+				return;
+			}
+			if (this.#nestedEnds.length === 0) {
+				this.closeValue(at + 1);
+				this.#mode = "comma-or-end";
+			}
+		}
+	}
+	closeValue(end) {
+		const entry = this.#current;
+		entry.end = end;
+		this.#current = null;
+	}
+});
 /** Duplicate-install-safe JSON and immutable-value helpers. @module @deepseek-ai/dsh-util-values */
 /**
 * Mark an unreachable closed-union branch.
@@ -996,7 +913,7 @@ function freezeMessage(message) {
 */
 /**
 * Base class for all harness errors. Carries a `code` (stable, programmatic —
-* e.g. `NO_ADAPTER`, `INVALID_ARGS`, `INVARIANT`) distinct from the
+* e.g. `NO_ADAPTER`, `INVALID_ARGS`) distinct from the
 * human-readable `message`, and supports `cause` chaining via the standard
 * `ErrorOptions`. `name` defaults to the subclass constructor name.
 */
@@ -1409,7 +1326,7 @@ function projectToolUpdates(messages, tools, toolUpdate, history) {
 /**
 * Centralize the non-secret product identity every provider request sends as `User-Agent`, keeping
 * adapters from drifting. See
-* `.agents/notes/implemented/architecture/2026-06-21-mandatory-app-attribution-headers.md`.
+* `docs/subsystems/llm-streaming.md#appidentity--app-attribution`.
 *
 * App-attribution vocabulary for provider requests.
 * @module @deepseek-ai/dsh-llm/attribution
@@ -1550,20 +1467,14 @@ var LlmError = class extends HarnessError {
 		}
 		/** Notify topology observers without letting one broken listener veto the commit. */
 		emitAdaptersUpdated() {
-			let invariantFailure;
 			for (const listener of this.ctx.events.dispatch("emit", ["llm/adapters-updated"])) try {
 				const returned = listener();
 				if (returned != null && typeof returned.then === "function") Promise.resolve(returned).then(void 0, (error) => {
 					this.warnAdaptersListenerFailure(error);
 				});
 			} catch (error) {
-				if (error?.code === "INVARIANT") {
-					invariantFailure ??= error;
-					continue;
-				}
 				this.warnAdaptersListenerFailure(error);
 			}
-			if (invariantFailure !== void 0) throw invariantFailure;
 		}
 		/** Contained-listener diagnostic shared by the sync and async failure paths. */
 		warnAdaptersListenerFailure(error) {
@@ -1672,10 +1583,7 @@ var LlmError = class extends HarnessError {
 					if (entry.provider.length === 0 || entry.displayName.length === 0 || entry.settingsNs.length === 0) throw new LlmError("configurable providers need a non-empty provider, displayName, and settingsNs", "INVALID_DIRECTORY");
 					if (entry.settingsPath.some((segment) => segment.length === 0)) throw new LlmError(`configurable provider "${entry.provider}" has an empty settingsPath segment`, "INVALID_DIRECTORY");
 					if (this.directory.has(entry.provider) && !own.has(entry.provider) || detached.some((seen) => seen.provider === entry.provider)) throw new LlmError(`configurable provider "${entry.provider}" is already declared`, "DUPLICATE_DIRECTORY");
-					detached.push({
-						...entry,
-						settingsPath: [...entry.settingsPath]
-					});
+					detached.push(detachDirectoryEntry(entry));
 				}
 				for (const entry of held) this.directory.delete(entry.provider);
 				for (const entry of detached) this.directory.set(entry.provider, entry);
@@ -1704,10 +1612,7 @@ var LlmError = class extends HarnessError {
 		* @returns detached directory entries in declaration order.
 		*/
 		listConfigurableProviders() {
-			return [...this.directory.values()].map((entry) => ({
-				...entry,
-				settingsPath: [...entry.settingsPath]
-			}));
+			return [...this.directory.values()].map(detachDirectoryEntry);
 		}
 		/**
 		* Offer to interrogate provider endpoints on behalf of the settings
@@ -1797,6 +1702,16 @@ var LlmError = class extends HarnessError {
 		*/
 		imageRequestPricing(provider, model) {
 			return this.adapters.get(provider)?.adapter.imageRequestPricing(provider, model);
+		}
+		/**
+		* Resolve the image projection for an exact registered model route.
+		* @param provider - registered provider route.
+		* @param model - exact model id.
+		* @param image - normalized image reference.
+		* @returns dimensions and byte target used by the adapter's request serializer.
+		*/
+		imageRequestTarget(provider, model, image) {
+			return this.registration(provider).adapter.imageRequestTarget(provider, model, image);
 		}
 		/**
 		* Resolve the exact text one durable file occurrence contributes to every
@@ -1944,20 +1859,33 @@ var LlmError = class extends HarnessError {
 		* Resolve one call under its current adapter registration. The returned
 		* one-shot handle keeps that registration across header logging and dispatch,
 		* so HMR cannot combine one adapter's capability result with another adapter.
-		* @param config - provider/model route and optional request controls.
+		* An optional synchronous callback selects concrete controls using captured
+		* model metadata. Defaults and validation apply to its result. Callback
+		* failures and cancellation reject preparation before dispatch.
+		* @param config - provider/model route and optional concrete request controls.
 		* @param signal - optional cancellation for adapter-owned capability lookup.
+		* @param configure - pure control selection, called once before defaults and validation.
 		* @returns a prepared config and its registration-bound stream entry point.
 		*/
-		async prepareCall(config, signal) {
-			const registration = this.registration(config.provider);
-			const adapterCall = await registration.adapter.prepareCall(config.provider, config.model, signal);
-			const modelInfo = this.normalizeModelInfo(registration, config.model, adapterCall.model);
-			const resolved = this.resolveCallWithInfo(config, modelInfo);
+		async prepareCall(config, signal, configure) {
+			signal?.throwIfAborted();
+			const { provider, model, ...controls } = config;
+			const registration = this.registration(provider);
+			const adapterCall = await registration.adapter.prepareCall(provider, model, signal);
+			signal?.throwIfAborted();
+			const modelInfo = this.normalizeModelInfo(registration, model, adapterCall.model);
+			const proposed = configure === void 0 ? config : {
+				...configure(deepFreeze(structuredClone(controls)), deepFreeze(modelInfo)),
+				provider,
+				model
+			};
+			signal?.throwIfAborted();
+			const resolved = this.resolveCallWithInfo(proposed, modelInfo);
 			const resolvedConfig = deepFreeze(structuredClone(resolved.config));
 			const context = resolved.context === void 0 ? void 0 : deepFreeze(structuredClone(resolved.context));
 			const adapterDefaults = deepFreeze({
-				...config.reasoningEffort === void 0 && resolvedConfig.reasoningEffort !== void 0 ? { reasoningEffort: true } : {},
-				...config.maxTokens === void 0 && resolvedConfig.maxTokens !== void 0 ? { maxTokens: true } : {}
+				...proposed.reasoningEffort === void 0 && resolvedConfig.reasoningEffort !== void 0 ? { reasoningEffort: true } : {},
+				...proposed.maxTokens === void 0 && resolvedConfig.maxTokens !== void 0 ? { maxTokens: true } : {}
 			});
 			let dispatched = false;
 			return Object.freeze({
@@ -2134,6 +2062,19 @@ function adapterFailureChunk(error, signal) {
 		}
 	};
 }
+/** Copy a directory entry, including its arrays, so neither side can mutate the other's copy. */
+function detachDirectoryEntry(entry) {
+	const { nativeAuth } = entry;
+	return {
+		...entry,
+		settingsPath: [...entry.settingsPath],
+		...entry.baseURLEnv === void 0 ? {} : { baseURLEnv: [...entry.baseURLEnv] },
+		...nativeAuth === void 0 ? {} : { nativeAuth: {
+			...nativeAuth,
+			env: [...nativeAuth.env]
+		} }
+	};
+}
 //#endregion
 //#region ../node_modules/@deepseek-ai/dsh-session/lib/index.js
 /**
@@ -2144,56 +2085,23 @@ function adapterFailureChunk(error, signal) {
 function SessionId(id) {
 	return brandString(id);
 }
-//#endregion
-//#region ../node_modules/@deepseek-ai/dsh-attachment/lib/index.js
-/** Attachment failure class. @module @deepseek-ai/dsh-attachment/error */
-const IMAGE_ADMISSION_ERROR_CODES = [
-	"TOO_MANY_IMAGES",
-	"IMAGES_TOO_LARGE",
-	"UNSUPPORTED_IMAGE_TYPE",
-	"INVALID_IMAGE_BASE64",
-	"INVALID_IMAGE",
-	"IMAGE_TYPE_MISMATCH",
-	"IMAGE_TOO_LARGE",
-	"IMAGE_TOO_MANY_PIXELS",
-	"IMAGE_DIMENSION_TOO_LARGE"
-];
-const ATTACHMENT_ERROR_CODES = [
-	...IMAGE_ADMISSION_ERROR_CODES,
-	"INVALID_FILE_BASE64",
-	"INVALID_ATTACHMENT_REF",
-	"ATTACHMENT_CORRUPT",
-	"ATTACHMENT_WRITE_FAILED",
-	"ATTACHMENT_NOT_FOUND",
-	"ATTACHMENT_READ_FAILED",
-	"ATTACHMENT_PROJECTION_UNSUPPORTED",
-	"ATTACHMENT_FILES_UNSUPPORTED"
-];
-new Set(IMAGE_ADMISSION_ERROR_CODES);
-new Set(ATTACHMENT_ERROR_CODES);
 /**
-* Stable failures suitable for host RPC error mapping.
-*
-* Deliberately re-implements the `HarnessError` shape instead of extending it:
-* the base lives in `@deepseek-ai/dsh-llm`, which itself depends on this
-* package (`ImageBlock` references `ImageAttachmentRef`), so sharing the base
-* would create a dependency cycle. Consumers route on `code`, never on the
-* prototype chain, so the shapes stay interchangeable at the wire boundary.
+* Deep structural equality over the session-event JSON value domain
+* (null/boolean/number/string, arrays, plain objects). Replaces
+* `node:util`'s isDeepStrictEqual to keep this module browser-safe.
 */
-var AttachmentError = class extends Error {
-	/** Stable machine-routing failure code. */
-	code;
-	/**
-	* @param message - human-readable failure description without raw bytes or host paths.
-	* @param code - stable machine-routing code.
-	* @param options - optional chained cause.
-	*/
-	constructor(message, code, options) {
-		super(message, options);
-		this.name = "AttachmentError";
-		this.code = code;
+function isDeepEqualJson(a, b) {
+	if (a === b) return true;
+	if (Array.isArray(a) || Array.isArray(b)) {
+		if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+		return a.every((item, i) => isDeepEqualJson(item, b[i]));
 	}
-};
+	if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+	const aKeys = Object.keys(a);
+	const bRecord = b;
+	if (aKeys.length !== Object.keys(b).length) return false;
+	return aKeys.every((key) => Object.hasOwn(b, key) && isDeepEqualJson(a[key], bRecord[key]));
+}
 //#endregion
 //#region ../.build/agent-preset-authoring/tsc/storage.js
 /**
@@ -2633,8 +2541,13 @@ async function isDirectory(path) {
 */
 /** The persona plugin's package name. */
 const PERSONA_PLUGIN_NAME = "@deepseek-ai/dsh-persona";
-/** The working-directory suffix template; `{{cwd}}` resolves per session. */
-const WORKING_DIRECTORY_SUFFIX = "Your working directory is {{cwd}}.";
+/**
+* The working-directory suffix template.
+*
+* 0.2.1 起 persona 模板不再注册 `{{cwd}}` 变量（会报 unknown prompt variable），
+* 工作目录已由宿主的 `working-directory` 消息源注入，所以这里不再内插变量。
+*/
+const WORKING_DIRECTORY_SUFFIX = "Your working directory is the session working directory.";
 /**
 * Render the persona prefix: the language directive when one was given,
 * followed by the author's persona text. Both lines are optional; an agent
@@ -3723,11 +3636,7 @@ let AgentPresetAuthoring = (() => {
 				reason: "open"
 			});
 			const persistence = this.ctx.get("sessionPersistence");
-			if (persistence?.remove === void 0) throw new RemoteError("agent-preset-authoring/remove-unavailable", `this deployment's session storage does not support deletion`, {
-				sessionId,
-				reason: "storage without deletion support"
-			});
-			if (!await persistence.remove(sessionId)) throw new RemoteError("agent-preset-authoring/session-not-found", `session "${sessionId}" not found`, { sessionId });
+			if (!(persistence?.remove === void 0 ? await removeSessionArtifacts(sessionId) : await persistence.remove(sessionId))) throw new RemoteError("agent-preset-authoring/session-not-found", `session "${sessionId}" not found`, { sessionId });
 			await this.ctx.get("sessionProjectionCache")?.forget?.(sessionId);
 			await this.ctx.get("workspaceRegistry")?.forgetSession?.(sessionId);
 			this.ctx.emit("api-session/removed", SessionId(sessionId));
@@ -3903,6 +3812,38 @@ function detachIdleAgent(ctx, sessionId) {
 	} catch {
 		return false;
 	}
+}
+/**
+* 直接删除某个会话在磁盘上的目录。
+*
+* 0.2.1 的会话持久化后端移除了 `remove`，会话按
+* `<harness home>/sessions/<projectKey>/session-<id>/` 组织，删掉整个会话目录即可。
+* 调用方随后还会清投影缓存、让工作区索引 forget，并广播 `api-session/removed`。
+* @param sessionId - the stored session id, with or without its `session-` prefix.
+* @returns whether any session directory was actually removed.
+*/
+async function removeSessionArtifacts(sessionId) {
+	const root = dshHomePath("sessions");
+	let projects;
+	try {
+		projects = await readdir(root);
+	} catch {
+		return false;
+	}
+	const directoryNames = sessionId.startsWith("session-") ? [sessionId] : [`session-${sessionId}`, sessionId];
+	let removed = false;
+	for (const project of projects) for (const name of directoryNames) {
+		const target = join(root, project, name);
+		if (!existsSync(target)) continue;
+		try {
+			await rm(target, {
+				recursive: true,
+				force: true
+			});
+			removed = true;
+		} catch {}
+	}
+	return removed;
 }
 //#endregion
 export { COMBINED_MODE_SUFFIX, Config, ENVIRONMENT_GROUPS, PRESET_ID, USER_PRESET_DIR, combinedPartsOf, AgentPresetAuthoring as default, defaultEnvironmentGroups, suggestCapabilityGroups };

@@ -24,6 +24,8 @@
  */
 
 import { Service, type Context } from '@deepseek-ai/cordis'
+import { existsSync } from 'node:fs'
+import { readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -681,12 +683,11 @@ async deleteSession(sessionId: string): Promise<void> {
   const persistence = this.ctx.get('sessionPersistence') as
     | { remove?(id: string): Promise<boolean> }
     | undefined
-  if (persistence?.remove === undefined) {
-    throw new RemoteError('agent-preset-authoring/remove-unavailable',
-      `this deployment's session storage does not support deletion`,
-      { sessionId, reason: 'storage without deletion support' })
-  }
-  const removed = await persistence.remove(sessionId)
+  // 0.2.1 起官方后端不再提供 remove（JsonlSessionPersistence 只剩 create / open / flush / stat / list），
+  // 而"删除聊天记录"正是本插件用来补官方缺口的能力，所以退到直接清理磁盘上的会话目录。
+  const removed = persistence?.remove === undefined
+    ? await removeSessionArtifacts(sessionId)
+    : await persistence.remove(sessionId)
   if (!removed) {
     throw new RemoteError('agent-preset-authoring/session-not-found',
       `session "${sessionId}" not found`, { sessionId })
@@ -922,4 +923,40 @@ function detachIdleAgent(ctx: Context, sessionId: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * 直接删除某个会话在磁盘上的目录。
+ *
+ * 0.2.1 的会话持久化后端移除了 `remove`，会话按
+ * `<harness home>/sessions/<projectKey>/session-<id>/` 组织，删掉整个会话目录即可。
+ * 调用方随后还会清投影缓存、让工作区索引 forget，并广播 `api-session/removed`。
+ * @param sessionId - the stored session id, with or without its `session-` prefix.
+ * @returns whether any session directory was actually removed.
+ */
+async function removeSessionArtifacts(sessionId: string): Promise<boolean> {
+  const root = dshHomePath('sessions')
+  let projects: string[]
+  try {
+    projects = await readdir(root)
+  } catch {
+    return false
+  }
+  const directoryNames = sessionId.startsWith('session-')
+    ? [sessionId]
+    : [`session-${sessionId}`, sessionId]
+  let removed = false
+  for (const project of projects) {
+    for (const name of directoryNames) {
+      const target = join(root, project, name)
+      if (!existsSync(target)) continue
+      try {
+        await rm(target, { recursive: true, force: true })
+        removed = true
+      } catch {
+        // 权限/占用等问题留给调用方的 session-not-found 汇报，这里不吞掉整轮删除
+      }
+    }
+  }
+  return removed
 }

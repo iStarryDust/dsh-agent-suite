@@ -393,6 +393,7 @@ export function apply(ctx: ClientContext): void {
       toggleCollapsed: () => { controller.toggleCollapsed() },
       create: (input: AgentFormInput) => controller.create(input),
       saveEdit: (id: string, input: AgentFormInput) => controller.saveEdit(id, input),
+      deleteAgent: (id: string) => controller.deleteAgent(id),
       remove: (id: string) => controller.remove(id),
       renameSession: (sessionId: string, title: string) => controller.renameSession(sessionId, title),
       archiveSession: (sessionId: string) => controller.archiveSession(sessionId),
@@ -511,6 +512,7 @@ export function apply(ctx: ClientContext): void {
     inject: () => ({
       hooks: { agents: controller.store },
       saveEdit: (id: string, input: AgentFormInput) => controller.saveEdit(id, input),
+      deleteAgent: (id: string) => controller.deleteAgent(id),
     }),
   }, ProfileMainPage))
   ctx.slots.inject('main', () => ctx.slots.register({

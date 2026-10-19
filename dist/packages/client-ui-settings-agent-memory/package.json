@@ -1,7 +1,7 @@
 {
   "name": "@istarry/dsh-client-ui-settings-agent-memory",
   "description": "Agent-memory settings page of the dsh web client: the four memory switches and the global memory editor",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "publishConfig": {
     "access": "public"
   },

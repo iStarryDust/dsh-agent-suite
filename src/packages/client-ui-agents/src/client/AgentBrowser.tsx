@@ -450,6 +450,8 @@ export interface ProfileMainPageInjected {
   }
   /** Save the edited identity. */
   saveEdit: (id: string, input: AgentFormInput) => Promise<string | undefined>
+  /** Delete the agent being edited, together with every chat it owned. */
+  deleteAgent: (id: string) => Promise<string | undefined>
 }
 
 /** Full component props of the profile main panel. */
@@ -465,13 +467,15 @@ export type ProfileMainPageProps =
  * @param props - the agents store hook, save action, locale.
  * @returns the bare profile fields page.
  */
-export function ProfileMainPage({ useAgents, saveEdit, t }: ProfileMainPageProps): ReactNode {
+export function ProfileMainPage({ useAgents, saveEdit, deleteAgent, t }: ProfileMainPageProps): ReactNode {
   const state = useAgents(snapshot => snapshot)
   const profile = state.profile
   const [name, setName] = useState('')
   const [language, setLanguage] = useState('')
   const [description, setDescription] = useState('')
   const [persona, setPersona] = useState('')
+  /** 删除需要二次确认：第一次点击变成「确认删除」，再点才真正执行。 */
+  const [confirmDelete, setConfirmDelete] = useState(false)
   useEffect(() => {
     if (profile === null || profile === undefined) return
     setName(profile.name)
@@ -487,6 +491,14 @@ export function ProfileMainPage({ useAgents, saveEdit, t }: ProfileMainPageProps
       description: description.trim(),
       persona,
     })
+  }
+  const remove = (): void => {
+    if (!confirmDelete) {
+      setConfirmDelete(true)
+      return
+    }
+    setConfirmDelete(false)
+    void deleteAgent(state.selected)
   }
   return (
     <div className={css.createPage}>
@@ -531,14 +543,25 @@ export function ProfileMainPage({ useAgents, saveEdit, t }: ProfileMainPageProps
             disabled={state.busy}
           />
         </label>
-        <button
-          type="button"
-          className={formCss.submit}
-          disabled={state.busy}
-          onClick={save}
-        >
-          {t('agents.memory.save')}
-        </button>
+        <div className={formCss.actions}>
+          <button
+            type="button"
+            className={formCss.delete}
+            disabled={state.busy}
+            onClick={remove}
+          >
+            {confirmDelete ? t('form.delete.confirm') : t('form.delete')}
+          </button>
+          <span className={formCss.actionsSpacer} />
+          <button
+            type="button"
+            className={formCss.submit}
+            disabled={state.busy}
+            onClick={save}
+          >
+            {t('agents.memory.save')}
+          </button>
+        </div>
       </div>
     </div>
   )

@@ -11,12 +11,20 @@ import {
 } from 'react'
 import {
   IconCheckOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular, IconEditOutlineRegular,
-  FileTypeIcon, JsonBlock, Tooltip, projectUserText, writeClipboard,
+  FileTypeIcon, JsonBlock, Tooltip, writeClipboard,
   fileExtension, fileSizeText,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   ChatNodeOwnerProps, ChatNodeViewProps,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
+
+/**
+ * 0.2.1 的 primitives 删掉了 `projectUserText`（旧版负责把 @引用与斜杠命令渲染成高亮片段）。
+ * 这里降级为纯文本渲染：消息内容完整显示，只是引用标签不再单独高亮。
+ */
+function projectUserText(text: string): ReactNode {
+  return text
+}
 
 import type { MessageImageSource } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -231,7 +239,7 @@ function UserBubble({
           </div>
         )}
         {showBubble && <div className={css.bubble}>
-          {projectUserText(text, node.referenceLabels ?? [], node.skillNames ?? [], 'skill', { openFile, openSkill })}
+          {projectUserText(text)}
           {rest.map((block, i) => <JsonBlock key={i} label={chatT('message.extraBlock')} payload={block} truncatedLabel={truncated} />)}
         </div>}
         {node.referenceLabels !== undefined && node.referenceLabels.length > 0 && (
