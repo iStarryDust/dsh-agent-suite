@@ -1,0 +1,15 @@
+# 依赖与构建中间产物
+node_modules/
+src/node_modules/
+dist/node_modules/
+src/.build/
+
+# 构建备份（每轮部署自动生成）
+dist/.build-backup/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
+
+*.log

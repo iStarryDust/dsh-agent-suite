@@ -1,0 +1,48 @@
+/** Locale bundles for the agent-memory settings page. */
+/** English copy. */
+export const en = {
+    nav: 'Agent memory',
+    intro: 'Long-term memory survives sessions. Enable the stores the system prompt should carry, and let the agent take notes on its own when allowed.',
+    switchesGroup: 'Memory switches',
+    globalGroup: 'Global memory document',
+    'globalEnabled.title': 'Global memory',
+    'globalEnabled.description': 'Inject the shared memory store into every conversation\'s system prompt.',
+    'agentEnabled.title': 'Agent memory',
+    'agentEnabled.description': 'Inject the current agent\'s own memory store into its conversations.',
+    'autoMemory.title': 'Automatic notes',
+    'autoMemory.description': 'Let the agent call the memory_add tool and write remembered facts on its own judgment.',
+    'askMemory.title': 'Ask before remembering',
+    'askMemory.description': 'The same tool call asks first; only an approved decision writes.',
+    'globalEditor.hint': 'One memory entry per line; every enabled conversation reads it.',
+    'globalEditor.placeholder': 'Write durable facts every agent should know…',
+    'globalEditor.save': 'Save',
+    'globalEditor.saving': 'Saving…',
+    'globalEditor.saved': 'Saved',
+    'globalEditor.saveFailed': 'Save failed',
+    unavailable: 'Memory settings are unavailable on this connection.',
+    writeFailed: 'The Host refused the switch change.',
+};
+/** Chinese copy. */
+export const zh = {
+    nav: '助理记忆',
+    intro: '长期记忆跨会话保留。选择要注入系统提示词的记忆库，并按需允许 Agent 自主记录。',
+    switchesGroup: '记忆开关',
+    globalGroup: '全局记忆文档',
+    'globalEnabled.title': '全局记忆',
+    'globalEnabled.description': '把共享记忆库注入每个对话的系统提示词。',
+    'agentEnabled.title': 'Agent 记忆',
+    'agentEnabled.description': '把当前 Agent 自己的记忆库注入其对话。',
+    'autoMemory.title': '自动记录',
+    'autoMemory.description': '允许 Agent 调用 memory_add 工具，按自身判断写入要记的事实。',
+    'askMemory.title': '记录前询问',
+    'askMemory.description': '同样的工具调用会先征求你的同意，批准后才写入。',
+    'globalEditor.hint': '每行一条记忆；启用后每个对话都会读取。',
+    'globalEditor.placeholder': '写下希望所有 Agent 都记住的持久事实…',
+    'globalEditor.save': '保存',
+    'globalEditor.saving': '保存中…',
+    'globalEditor.saved': '已保存',
+    'globalEditor.saveFailed': '保存失败',
+    unavailable: '当前连接不提供记忆设置。',
+    writeFailed: '主机拒绝了此次开关修改。',
+};
+//# sourceMappingURL=locales.js.map

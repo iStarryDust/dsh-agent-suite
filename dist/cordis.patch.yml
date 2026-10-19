@@ -1,0 +1,17 @@
+# The agent management suite: one bundle, four rows. The authoring service
+# owns the `.agent-presets` directory, the agentOwner projection, and the
+# session-side verbs the edit surface uses (file reads, fork boundary, and
+# the existing deleteSession); the memory plugin owns the harness-home memory
+# stores; the two client packages render the browser, the hero mode chip, the
+# memory settings page, and the inline message editor.
+- insert:
+    - id: agent-preset-authoring
+      name: '@istarry/dsh-agent-preset-authoring'
+    - id: agent-memory
+      name: '@istarry/dsh-agent-memory'
+    - id: ui-agents
+      name: '@istarry/dsh-client-ui-agents'
+    - id: ui-settings-agent-memory
+      name: '@istarry/dsh-client-ui-settings-agent-memory'
+    - id: ui-edit-regen
+      name: '@istarry/dsh-client-ui-edit-regen'

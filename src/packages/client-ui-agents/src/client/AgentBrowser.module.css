@@ -1,0 +1,1070 @@
+/* Agent browsing region (fills the sidebar shell's hole): the selected-agent
+   action strip, the roster header, and the scrolling agent list. */
+
+.root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding-right: var(--dsh-sidebar-inline-padding);
+}
+
+.centered {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  text-align: center;
+  padding: 16px;
+}
+
+.error {
+  color: var(--dsw-alias-danger);
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.retry {
+  border: none;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* Selected-agent action strip. */
+.selectedArea {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 8px;
+  margin: 2px 2px 8px;
+  border: 1px solid var(--dsw-alias-border-default);
+  border-radius: 12px;
+  background: var(--dsw-alias-surface-raised);
+}
+
+.selectedName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action {
+  flex: 1;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.action:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+/* Chat-history section header (the official workspace browser's header:
+   title left, expandable search and the view-options / add-workspace cluster
+   right). */
+.sectionHeader {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding-left: 4px;
+  box-sizing: border-box;
+}
+
+.sectionLabel {
+  flex: none;
+  margin-right: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The header's icon cluster, cloned from WorkspaceBrowser.module.css. */
+.iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.headerActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.viewOptionsMenu {
+  min-width: 200px;
+}
+
+/* The expandable inline search, cloned from WorkspaceBrowser.module.css. */
+.searchSlot {
+  flex: 1;
+  max-width: 28px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  box-sizing: border-box;
+  transition: max-width 180ms var(--ds-ease-in-out);
+}
+
+.searchSlotExpanded {
+  max-width: 100%;
+}
+
+.search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  cursor: text;
+  color: var(--dsw-alias-label-secondary);
+  overflow: hidden;
+  transition:
+    width 180ms var(--ds-ease-in-out),
+    padding 180ms var(--ds-ease-in-out),
+    border-color 180ms var(--ds-ease-in-out),
+    background-color 180ms var(--ds-ease-in-out);
+}
+
+.searchExpanded {
+  width: calc(100% + 4px);
+  height: 30px;
+  margin-inline: -2px;
+  padding: 0 4px 0 0;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: var(--dsw-alias-label-caption);
+}
+
+.searchButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+}
+
+.searchButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.searchExpanded .searchButton:hover {
+  background: transparent;
+}
+
+.searchInput {
+  flex: 1;
+  width: 0;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  transition: opacity 120ms var(--ds-ease-in-out);
+}
+
+.searchExpanded .searchInput {
+  margin-left: -2px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.searchInput::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.clearButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.clearButton:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Agent rows. */
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  background: transparent;
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.row:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowName {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.rowDescription {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* Chat-history row on the official session-row metrics: 32px tall, a 16px
+   leading slot, then the title; the trailing time yields to the hover
+   actions. The drop markers are the official insert lines, cloned. */
+.chatRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  height: 32px;
+  box-sizing: border-box;
+  border-radius: var(--dsw-radius-md);
+  padding: 0 8px;
+  padding-inline-start: calc(8px + var(--dsh-workspace-indent, 0px));
+  cursor: pointer;
+  user-select: none;
+  color: var(--dsw-alias-label-primary);
+}
+
+.chatRow:hover,
+.chatRow.active,
+.chatRow.menuOpen {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.chatSlot {
+  flex: none;
+  width: 16px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The row's scheduled-reminder clock mark (official ui-schedule parity),
+   riding the same leading cell. */
+.scheduleMark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.chatTitle {
+  flex: 1;
+  min-width: 0;
+  margin: 0 6px 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.chatTime {
+  flex: none;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Rest-state pin marker; the enclosing row stays the only click target and
+   the hover action strip takes the marker's place. */
+.chatPinIndicator {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  color: var(--dsw-alias-label-caption);
+}
+
+/* The trailing action strip surfaces on hover (or while the row's menu is
+   open) in the time's place: bare 16px glyphs at the official gap of 10. */
+.chatRowActions {
+  flex: none;
+  display: none;
+  align-items: center;
+  gap: 10px;
+}
+
+.chatRow:hover .chatRowActions,
+.chatRow.menuOpen .chatRowActions {
+  display: inline-flex;
+}
+
+.chatRow:hover .chatTime,
+.chatRow.menuOpen .chatTime,
+.chatRow:hover .chatPinIndicator,
+.chatRow.menuOpen .chatPinIndicator {
+  display: none;
+}
+
+/* The unclipped hover state drops the ellipsis so it never covers characters
+   the row's title reached (the official hover rule). */
+@media (hover: hover) {
+  .chatRow:hover .chatTitle,
+  .chatRow.menuOpen .chatTitle {
+    text-overflow: clip;
+  }
+}
+
+.chatRowAction {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: var(--dsw-radius-xs);
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.chatRowAction:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Archived rows stay in place but read as inactive: the title drops to the
+   caption step, the official archived treatment. */
+.chatArchived .chatTitle {
+  color: var(--dsw-alias-label-caption);
+}
+
+/* Drag insert lines (cloned from the official Rows.module.css): a dashed
+   accent line above or below the row under the pointer. */
+.chatRow.dropBefore,
+.chatRow.dropAfter {
+  z-index: 1;
+}
+
+.chatRow.dropBefore::before,
+.chatRow.dropAfter::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 4px;
+  height: 12px;
+  background:
+    linear-gradient(
+      55deg,
+      transparent calc(50% - 1px),
+      var(--dsw-alias-state-business-primary) calc(50% - 1px) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    ) 0 0 / 5px 7px no-repeat,
+    linear-gradient(
+      125deg,
+      transparent calc(50% - 1px),
+      var(--dsw-alias-state-business-primary) calc(50% - 1px) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    ) 0 5px / 5px 7px no-repeat,
+    linear-gradient(var(--dsw-alias-state-business-primary) 0 0) 4px 5px / calc(100% - 4px) 2px no-repeat;
+  pointer-events: none;
+}
+
+.chatRow.dropBefore::before {
+  top: -7px;
+}
+
+.chatRow.dropAfter::after {
+  bottom: -7px;
+}
+
+/* Workspace group sections on the official rhythm: 2px between a header and
+   its rows, 4px between sections. */
+.groupSection {
+  position: relative;
+}
+
+.groupSection + .groupSection {
+  margin-top: 4px;
+}
+
+.groupSection > * + * {
+  margin-top: 2px;
+}
+
+/* The official project-row metrics: 34px tall, folder slot, title. */
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
+  box-sizing: border-box;
+  border: none;
+  border-radius: var(--dsw-radius-md);
+  padding: 0 8px;
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+  text-align: left;
+  color: var(--dsw-alias-label-primary);
+}
+
+.groupHeader:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.groupSlot {
+  flex: none;
+  width: 16px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The group holding the open session tints its folder (the official mark). */
+.groupSlotActive {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+/* Folder by default, expand arrow on hover (the official swap); the arrow
+   rides the caption grey and rotates to point down while open. */
+.groupChevron {
+  display: none;
+  color: var(--dsw-alias-label-caption);
+}
+
+.groupHeader:hover .groupChevron {
+  display: inline-flex;
+}
+
+.groupHeader:hover .groupFolder {
+  display: none;
+}
+
+.groupArrow {
+  transition: transform 150ms var(--ds-ease-in-out);
+}
+
+.groupArrowOpen {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .groupArrow {
+    transition: none;
+  }
+}
+
+.groupTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* Session rows sit one official 12px step under their group header; scoped
+   to grouped sections so the flat list keeps the official 8px edge. */
+.groupSection .groupRows {
+  --dsh-workspace-indent: 12px;
+}
+
+.groupRows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Workspace reorder: the same dashed insert lines as chat rows, riding the
+   group header (position:relative anchors the pseudo-elements). */
+.groupHeader {
+  position: relative;
+}
+
+.groupHeader.groupDropBefore,
+.groupHeader.groupDropAfter {
+  z-index: 1;
+}
+
+.groupHeader.groupDropBefore::before,
+.groupHeader.groupDropAfter::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 4px;
+  height: 12px;
+  background:
+    linear-gradient(
+      55deg,
+      transparent calc(50% - 1px),
+      var(--dsw-alias-state-business-primary) calc(50% - 1px) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    ) 0 0 / 5px 7px no-repeat,
+    linear-gradient(
+      125deg,
+      transparent calc(50% - 1px),
+      var(--dsw-alias-state-business-primary) calc(50% - 1px) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    ) 0 5px / 5px 7px no-repeat,
+    linear-gradient(var(--dsw-alias-state-business-primary) 0 0) 4px 5px / calc(100% - 4px) 2px no-repeat;
+  pointer-events: none;
+}
+
+.groupHeader.groupDropBefore::before {
+  top: -7px;
+}
+
+.groupHeader.groupDropAfter::after {
+  bottom: -7px;
+}
+
+/* Content-search results: the matched snippet rides under the title as a
+   caption line, and query progress / the result cap render as status lines. */
+.chatBody {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.chatBody .chatTitle {
+  margin: 0;
+}
+
+.chatSnippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.searchResults {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.searchStatus {
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Rename / delete dialogs. */
+.renameInput {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-default);
+  border-radius: 8px;
+  background: var(--dsw-alias-surface-default);
+  color: var(--dsw-alias-label-primary);
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+}
+
+.renameInput:focus {
+  border-color: var(--dsw-alias-accent);
+}
+
+.dialogError {
+  margin-top: 8px;
+  color: var(--dsw-alias-danger);
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.deleteAction {
+  color: var(--dsw-alias-danger) !important;
+  border-color: var(--dsw-alias-danger) !important;
+}
+
+/* The stop-and-archive confirmation's work list. */
+.archiveActivity {
+  margin: 0;
+  padding: 0 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.deleteStatus {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Collapsible roster title. */
+.collapsibleTitle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  padding: 4px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.collapsibleTitle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.chevron {
+  font-size: 10px;
+  line-height: 1;
+  transition: transform 120ms var(--ds-ease-in-out);
+}
+
+.chevronClosed {
+  transform: rotate(90deg);
+}
+
+/* The gated main region: the bare brand hero while the browser is outside
+   an agent page (the conversation shell's shadow replacement), cloned from
+   HeroShell.module.css with the same tokens and geometry. */
+.heroGate {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 24px;
+}
+
+.memoryView {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.memoryHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.backLink {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-accent-2);
+  cursor: pointer;
+}
+
+.memoryTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dsw-alias-fg-1);
+}
+
+.memoryHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-fg-3);
+}
+
+.memoryTextarea {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-1);
+  color: var(--dsw-alias-fg-1);
+}
+
+.memoryFooter {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.memorySaved {
+  font-size: 12px;
+  color: var(--dsw-alias-success, #3fb984);
+}
+
+/* The browser's primary control (创建 Agent on the roster, 返回 inside an
+   agent page), cloned from the shell's New Session button: same height,
+   stroke, radius, elevated fill, and hover, so it reads as the column's own
+   primary control. */
+.primaryAction {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 38px;
+  padding: 8px 12px;
+  margin: 0 2px 12px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-button-elevated-fill);
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.primaryAction:hover {
+  background: var(--dsw-alias-button-floating-hover);
+}
+
+.primaryAction > svg {
+  flex: none;
+}
+
+/* The agent page's actions, one per row, in the same primary dress. */
+.actionRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.actionRows .primaryAction {
+  margin: 0;
+}
+
+.heroGateStack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
+  max-width: var(--dsh-composer-card-max-width);
+  overflow: visible;
+}
+
+.heroGateHeadline {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 10px;
+  row-gap: 12px;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  line-height: 32px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.heroGateTitleGroup {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  column-gap: 7px;
+  row-gap: 4px;
+  min-width: 0;
+}
+
+.heroGateBadge {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 7px 0;
+  border: 0.5px solid var(--dsw-alias-interactive-bg-hover);
+  border-radius: 999px;
+  background: var(--dsw-alias-state-business-tertiary);
+  color: var(--dsw-alias-label-primary-bluish);
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.heroGateFish {
+  display: block;
+  overflow: visible;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ===== Main-area panels (create / profile / memory) and the brand seat ===== */
+
+/* The create page as a genuine main-area panel: a centered column on the
+   panel's blank page, scrolling when the form outgrows the viewport. */
+.createPage {
+  box-sizing: border-box;
+  height: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 32px 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Panel-row swap driven by the browser's data-agents-view flag, addressed by
+   the marker each row's glyph carries (data-agents-panel) rather than by
+   position: the official rows above the suite's — plugins, skills, scheduled
+   tasks — differ between deployments, so a positional rule hides the wrong row
+   the day that count changes.
+
+   Roster (no agent selected): the create row, and nothing else.
+   Agent page: the create row gives way to the three per-agent action rows
+   (new chat / profile / memory). The new chat row keeps the create row's
+   place because it sorts right behind it. */
+nav[class*='panelList'] button:has([data-agents-panel='newchat']),
+nav[class*='panelList'] button:has([data-agents-panel='profile']),
+nav[class*='panelList'] button:has([data-agents-panel='memory']) {
+  display: none;
+}
+
+body[data-agents-view='agent'] nav[class*='panelList'] button:has([data-agents-panel='create']) {
+  display: none;
+}
+
+body[data-agents-view='agent'] nav[class*='panelList'] button:has([data-agents-panel='newchat']),
+body[data-agents-view='agent'] nav[class*='panelList'] button:has([data-agents-panel='profile']),
+body[data-agents-view='agent'] nav[class*='panelList'] button:has([data-agents-panel='memory']) {
+  display: flex;
+}
+
+/* The brand seat: on an agent's surface the whale gives way to the back
+   control and the agent's name; off it, the official local-build badge. */
+.brandBack {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--dsw-radius-md);
+  justify-content: center;
+  align-items: center;
+  display: inline-flex;
+}
+
+.brandBack:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.brandSwap {
+  display: inline-flex;
+}
+
+.brandRailWhale {
+  display: none;
+}
+
+.brandSwap[data-rail='true'] .brandRailWhale {
+  display: inline-flex;
+}
+
+.brandSwap[data-rail='true'] .brandBack {
+  display: none;
+}
+
+.brandAgentName {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brandFallbackName {
+  font-size: 17px;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.brandStack {
+  flex: none;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  height: 24px;
+  white-space: nowrap;
+  display: inline-flex;
+}
+
+.brandStackTitle {
+  font-size: 12px;
+  line-height: 13px;
+  letter-spacing: 0;
+}
+
+.brandStackVersion {
+  flex: none;
+  align-items: center;
+  height: 10px;
+  color: var(--dsw-alias-label-primary-inverted);
+  background: var(--dsw-alias-label-primary);
+  border-radius: 2px;
+  padding: 0 3px;
+  font-family: var(--ds-font-family-code);
+  font-size: 6px;
+  font-weight: 500;
+  line-height: 10px;
+  white-space: nowrap;
+  display: inline-flex;
+}
+
+/* The repurposed brand content must not surface the New Session tooltip the
+   enclosing button carries; the toggle's own tooltip survives via the
+   data-rail flag (brandSiteRef strips data-dsh-brand inside the toggle). */
+div:has(button [data-dsh-brand]:hover) > span[role='tooltip'] {
+  display: none !important;
+}
+
+/* Roster create rows (wide row and rail icon), matching the section header. */
+.rosterCreate {
+  box-sizing: border-box;
+  border: none;
+  border-radius: var(--dsw-radius-md);
+  background: 0 0;
+  min-height: 36px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin: 0 2px 4px;
+  padding: 7px 8px;
+  font: inherit;
+  line-height: 22px;
+  text-align: left;
+  display: flex;
+}
+
+.rosterCreate:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rosterCreate > svg {
+  flex: none;
+}
+
+.rosterCreateRail {
+  width: 36px;
+  height: 36px;
+  min-height: 0;
+  justify-content: center;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+}

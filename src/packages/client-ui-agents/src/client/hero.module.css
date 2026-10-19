@@ -1,0 +1,95 @@
+.seat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+
+.seat:hover {
+  background: var(--dsh-hover, rgba(128, 128, 128, 0.12));
+}
+
+.seat:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.seatIcon {
+  opacity: 0.8;
+}
+
+.seatLabel {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chevron {
+  opacity: 0.55;
+}
+
+.menuAnchor {
+  display: inline-flex;
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 320px;
+}
+
+.itemName {
+  font-size: 13px;
+}
+
+.itemDesc {
+  font-size: 12px;
+  opacity: 0.65;
+}
+
+.defineBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.defineIntro {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.defineError {
+  color: var(--dsh-danger, #d33);
+  font-size: 12px;
+}
+
+.defineField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.defineLabel {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.defineTextarea {
+  width: 100%;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.defineGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

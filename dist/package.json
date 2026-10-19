@@ -1,0 +1,47 @@
+{
+  "name": "@istarry/dsh-agent-suite",
+  "description": "The agent suite: identity authoring, per-agent long-term memory, the hero mode chip, and edit-and-regenerate for user messages (images and files carried over, model and preset inherited)",
+  "version": "0.1.2",
+  "icon": "./icon.svg",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "icon.svg",
+    "locale/*.json",
+    "lib/index.js",
+    "cordis.patch.yml",
+    "lib/types/**/*.d.ts",
+    "LICENSE",
+    "README*.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@istarry/dsh-agent-memory": "^0.1.2",
+    "@istarry/dsh-agent-preset-authoring": "^0.1.2",
+    "@istarry/dsh-client-ui-agents": "^0.1.2",
+    "@istarry/dsh-client-ui-edit-regen": "^0.1.2",
+    "@istarry/dsh-client-ui-settings-agent-memory": "^0.1.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iStarryDust/dsh-agent-suite.git"
+  }
+}

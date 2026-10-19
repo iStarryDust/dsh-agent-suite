@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Agent suite & edit-regen",
+    "description": "Create and orchestrate your own agents: define mode, capability picking, and long-term memory that applies from the next message; edit any message and regenerate — images and files ride along, and the new session inherits the model and preset; one agent is one entity, with chat history grouped across workspaces"
+  }
+}
