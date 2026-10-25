@@ -1,7 +1,7 @@
 {
   "name": "@istarry/dsh-agent-preset-authoring",
   "description": "Directory-backed agent identity authoring over the declarative preset registry",
-  "version": "0.1.5",
+  "version": "0.1.8",
   "publishConfig": {
     "access": "public"
   },
@@ -46,7 +46,7 @@
   "license": "MIT",
   "peerDependencies": {},
   "dependencies": {
-    "@deepseek-ai/dsh-atomic-write": "workspace:*",
+    "@deepseek-ai/dsh-atomic-write": ">=0.2.1-rc.2",
     "@deepseek-ai/schemastery": "workspace:~",
     "js-yaml": "^4.2.0",
     "zod": "^4.4.3",

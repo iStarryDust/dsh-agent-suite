@@ -1,7 +1,7 @@
 {
   "name": "@istarry/dsh-agent-suite",
   "description": "The agent suite: identity authoring, per-agent long-term memory, the hero mode chip, and edit-and-regenerate for user messages (images and files carried over, model and preset inherited)",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -53,5 +53,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/iStarryDust/dsh-agent-suite.git"
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
   }
 }
